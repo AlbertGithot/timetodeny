@@ -13,23 +13,19 @@ Next.js chat UI with a Django/Python backend for local AI workflows.
 - SQLite for local development, MySQL via environment variables.
 - llama.cpp integration through `llama-server` and GGUF models.
 
+## Branch
+
+This is the Windows branch. It contains the shared Django/Next.js code and the Windows launchers only.
+
 ## Launch
 
-By default the launchers start `llama-server` together with Django and Next.js. Put a GGUF model into `backend/models` or set `LLAMA_CPP_MODEL_PATH`.
-
-Linux:
-
-```bash
-./launchers/linux.sh
-```
-
-Windows:
+By default the launcher starts `llama-server.exe` together with Django and Next.js. Put a GGUF model into `backend\models` or set `LLAMA_CPP_MODEL_PATH`.
 
 ```bat
 launchers\windows.bat
 ```
 
-The launchers start:
+The launcher starts:
 
 - llama.cpp: `http://127.0.0.1:8080`
 - Frontend: `http://127.0.0.1:4028`
@@ -38,54 +34,47 @@ The launchers start:
 
 ## Manual Backend
 
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r backend/requirements.txt
-python backend/manage.py migrate
-python backend/manage.py shell -c "from core.seed import ensure_defaults; ensure_defaults()"
-python backend/manage.py runserver 127.0.0.1:8000
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r backend\requirements.txt
+python backend\manage.py migrate
+python backend\manage.py shell -c "from core.seed import ensure_defaults; ensure_defaults()"
+python backend\manage.py runserver 127.0.0.1:8000
 ```
 
 ## Manual Frontend
 
-```bash
+```powershell
 npm install
-NEXT_PUBLIC_API_BASE=http://127.0.0.1:8000/api npm run dev
+$env:NEXT_PUBLIC_API_BASE = "http://127.0.0.1:8000/api"
+npm run dev
 ```
 
 ## MySQL
 
 Set these before running migrations:
 
-```bash
-export MYSQL_DATABASE=timetodeny
-export MYSQL_USER=ttd
-export MYSQL_PASSWORD=change-me
-export MYSQL_HOST=127.0.0.1
-export MYSQL_PORT=3306
+```powershell
+$env:MYSQL_DATABASE = "timetodeny"
+$env:MYSQL_USER = "ttd"
+$env:MYSQL_PASSWORD = "change-me"
+$env:MYSQL_HOST = "127.0.0.1"
+$env:MYSQL_PORT = "3306"
 ```
 
 Without `MYSQL_DATABASE`, Django uses `backend/db.sqlite3`.
 
 ## llama.cpp Model Backend
 
-The model core is `llama.cpp`. The backend streams text requests through `llama-server` when `TTD_MODEL_BACKEND=llamacpp`.
+The model core is `llama.cpp`. The backend streams text requests through `llama-server.exe` when `TTD_MODEL_BACKEND=llamacpp`.
 
 Run an existing llama.cpp server:
 
-```bash
-llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8080 -c 8192
-export TTD_MODEL_BACKEND=llamacpp
-export TTD_LLAMA_CPP_URL=http://127.0.0.1:8080
-```
-
-Or let the launcher find and start it:
-
-```bash
-mkdir -p backend/models
-cp /path/to/model.gguf backend/models/
-./launchers/linux.sh
+```powershell
+llama-server.exe -m C:\models\model.gguf --host 127.0.0.1 --port 8080 -c 8192
+$env:TTD_MODEL_BACKEND = "llamacpp"
+$env:TTD_LLAMA_CPP_URL = "http://127.0.0.1:8080"
 ```
 
 Windows PowerShell:
@@ -99,8 +88,8 @@ launchers\windows.bat
 Useful llama.cpp env vars:
 
 - `TTD_LLAMA_CPP_URL`: Django target URL, default `http://127.0.0.1:8080`.
-- `LLAMA_CPP_MODEL_PATH`: GGUF file the launcher passes to `llama-server`.
-- `LLAMA_CPP_BIN`: llama.cpp server binary, default `llama-server`.
+- `LLAMA_CPP_MODEL_PATH`: GGUF file the launcher passes to `llama-server.exe`.
+- `LLAMA_CPP_BIN`: llama.cpp server binary, default `llama-server.exe`.
 - `LLAMA_CPP_CTX_SIZE`: context size passed to launcher, default `8192`.
 - `LLAMA_CPP_THREADS`: optional thread count.
 - `LLAMA_CPP_GPU_LAYERS`: optional GPU layer count.
@@ -108,6 +97,7 @@ Useful llama.cpp env vars:
 
 `mock` remains available for UI/backend smoke tests, because debugging CSS while waiting for a 14B model to wake up is punishment, not engineering.
 
-```bash
-TTD_MODEL_BACKEND=mock ./launchers/linux.sh
+```powershell
+$env:TTD_MODEL_BACKEND = "mock"
+launchers\windows.bat
 ```
