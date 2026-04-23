@@ -1,9 +1,10 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { toast } from 'sonner';
 import { Download, Trash2, Eye, EyeOff, Terminal, CheckCircle, AlertTriangle, Search, RefreshCw, Play, Square } from 'lucide-react';
+import { getJson, postJson } from '@/lib/api';
 
 interface ModelEntry {
   id: string;
@@ -32,80 +33,6 @@ interface SystemPromptForm {
   prompt: string;
 }
 
-const INITIAL_MODELS: ModelEntry[] = [
-  {
-    id: 'model-deepseek',
-    name: 'deepseek-r1:14b',
-    repoId: 'deepseek-ai/DeepSeek-R1-Distill-Qwen-14B-GGUF',
-    filename: 'DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf',
-    type: 'text',
-    size: '8.99GB',
-    status: 'ready',
-    vram: '9.2GB',
-    selected: true,
-    hidden: false,
-    systemPrompt: 'You are TTD, a highly capable local AI assistant. Be concise, precise, and technical. Prefer code over prose when applicable.',
-    quantization: 'Q4_K_M',
-  },
-  {
-    id: 'model-qwen',
-    name: 'qwen2.5-coder:7b',
-    repoId: 'Qwen/Qwen2.5-Coder-7B-Instruct-GGUF',
-    filename: 'qwen2.5-coder-7b-instruct-q5_k_m.gguf',
-    type: 'code',
-    size: '5.09GB',
-    status: 'ready',
-    vram: '5.1GB',
-    selected: false,
-    hidden: false,
-    systemPrompt: 'You are an expert code assistant. Generate clean, well-commented, production-ready code. Always include error handling.',
-    quantization: 'Q5_K_M',
-  },
-  {
-    id: 'model-llama',
-    name: 'llama3.3:70b',
-    repoId: 'bartowski/Llama-3.3-70B-Instruct-GGUF',
-    filename: 'Llama-3.3-70B-Instruct-Q3_K_M.gguf',
-    type: 'text',
-    size: '29.1GB',
-    status: 'unloaded',
-    vram: '42GB',
-    selected: false,
-    hidden: false,
-    systemPrompt: 'You are a helpful, harmless, and honest AI assistant with deep reasoning capabilities.',
-    quantization: 'Q3_K_M',
-  },
-  {
-    id: 'model-flux',
-    name: 'flux-dev',
-    repoId: 'black-forest-labs/FLUX.1-dev-gguf',
-    filename: 'flux1-dev-Q8_0.gguf',
-    type: 'vision',
-    size: '15.6GB',
-    status: 'ready',
-    vram: '7.8GB',
-    selected: false,
-    hidden: false,
-    systemPrompt: '',
-    quantization: 'Q8_0',
-  },
-  {
-    id: 'model-phi4',
-    name: 'phi-4:14b',
-    repoId: 'microsoft/phi-4-gguf',
-    filename: 'phi-4-q4.gguf',
-    type: 'text',
-    size: '8.1GB',
-    status: 'error',
-    vram: '—',
-    selected: false,
-    hidden: true,
-    systemPrompt: 'You are Phi, a helpful AI assistant by Microsoft.',
-    quantization: 'Q4_0',
-    downloadProgress: 0,
-  },
-];
-
 const STATUS_CONFIG = {
   ready: { label: 'READY', cls: 'text-ttd-green border-ttd-green/30 bg-ttd-green/5' },
   loading: { label: 'LOADING', cls: 'text-ttd-cyan border-ttd-cyan/30 bg-ttd-cyan/5' },
@@ -120,8 +47,18 @@ const TYPE_CONFIG = {
   code: { label: 'CODE', cls: 'text-ttd-green border-ttd-green/30' },
 };
 
+interface ModelsResponse {
+  ok: boolean;
+  models: ModelEntry[];
+}
+
+interface ModelResponse {
+  ok: boolean;
+  model: ModelEntry;
+}
+
 export default function AdminModelsTab() {
-  const [models, setModels] = useState<ModelEntry[]>(INITIAL_MODELS);
+  const [models, setModels] = useState<ModelEntry[]>([]);
   const [search, setSearch] = useState('');
   const [editingPrompt, setEditingPrompt] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
@@ -129,7 +66,17 @@ export default function AdminModelsTab() {
   const [installProgress, setInstallProgress] = useState(0);
 
   const { register, handleSubmit, reset, formState: { errors } } = useForm<InstallForm>();
-  const { register: regPrompt, handleSubmit: handlePromptSubmit, setValue: setPromptValue, formState: { errors: promptErrors } } = useForm<SystemPromptForm>();
+  const { register: regPrompt, handleSubmit: handlePromptSubmit, setValue: setPromptValue } = useForm<SystemPromptForm>();
+
+  const loadModels = () => {
+    getJson<ModelsResponse>('/models')
+      .then(payload => setModels(payload.models))
+      .catch((error: Error) => toast.error(error.message));
+  };
+
+  useEffect(() => {
+    loadModels();
+  }, []);
 
   const filtered = models.filter(m =>
     m.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -139,35 +86,64 @@ export default function AdminModelsTab() {
   const visibleModels = filtered.filter(m => !m.hidden);
   const hiddenModels = filtered.filter(m => m.hidden);
 
-  const handleSelect = (id: string) => {
-    setModels(prev => prev.map(m => ({ ...m, selected: m.id === id })));
-    const model = models.find(m => m.id === id);
-    toast.success(`${model?.name} selected for responses`);
+  const handleSelect = async (id: string) => {
+    try {
+      const payload = await postJson<ModelResponse>(`/models/${id}/select`, {}, true);
+      setModels(prev => prev.map(m => m.id === id ? payload.model : { ...m, selected: false }));
+      toast.success(`${payload.model.name} selected for responses`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Model select failed');
+    }
   };
 
-  const handleDeselect = (id: string) => {
-    setModels(prev => prev.map(m => m.id === id ? { ...m, selected: false } : m));
-    toast('Model deselected');
+  const handleDeselect = async (id: string) => {
+    try {
+      const payload = await postJson<ModelResponse>(`/models/${id}/deselect`, {}, true);
+      setModels(prev => prev.map(m => m.id === id ? payload.model : m));
+      toast('Model deselected');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Model deselect failed');
+    }
   };
 
-  const handleHide = (id: string) => {
-    setModels(prev => prev.map(m => m.id === id ? { ...m, hidden: true } : m));
+  const handleHide = async (id: string) => {
+    try {
+      const payload = await postJson<ModelResponse>(`/models/${id}/hide`, {}, true);
+      setModels(prev => prev.map(m => m.id === id ? payload.model : m));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Hide failed');
+    }
   };
 
-  const handleShowAll = () => {
-    setModels(prev => prev.map(m => ({ ...m, hidden: false })));
-    toast.success('All models visible');
+  const handleShowAll = async () => {
+    try {
+      await postJson('/models/show-all', {}, true);
+      setModels(prev => prev.map(m => ({ ...m, hidden: false })));
+      toast.success('All models visible');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Show all failed');
+    }
   };
 
-  const handleHideAll = () => {
-    setModels(prev => prev.map(m => ({ ...m, hidden: true })));
-    toast('All models hidden');
+  const handleHideAll = async () => {
+    try {
+      await postJson('/models/hide-all', {}, true);
+      setModels(prev => prev.map(m => ({ ...m, hidden: true })));
+      toast('All models hidden');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Hide all failed');
+    }
   };
 
-  const handleDelete = (id: string) => {
-    setModels(prev => prev.filter(m => m.id !== id));
-    setDeleteConfirm(null);
-    toast.success('Model removed from registry');
+  const handleDelete = async (id: string) => {
+    try {
+      await postJson(`/models/${id}/delete`, {}, true);
+      setModels(prev => prev.filter(m => m.id !== id));
+      setDeleteConfirm(null);
+      toast.success('Model removed from registry');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Delete failed');
+    }
   };
 
   const handleEditPrompt = (model: ModelEntry) => {
@@ -175,47 +151,35 @@ export default function AdminModelsTab() {
     setPromptValue('prompt', model.systemPrompt);
   };
 
-  const handleSavePrompt = (data: SystemPromptForm) => {
-    setModels(prev => prev.map(m => m.id === editingPrompt ? { ...m, systemPrompt: data.prompt } : m));
-    setEditingPrompt(null);
-    toast.success('System prompt updated');
+  const handleSavePrompt = async (data: SystemPromptForm) => {
+    if (!editingPrompt) return;
+    try {
+      const payload = await postJson<ModelResponse>(`/models/${editingPrompt}/prompt`, { prompt: data.prompt }, true);
+      setModels(prev => prev.map(m => m.id === editingPrompt ? payload.model : m));
+      setEditingPrompt(null);
+      toast.success('System prompt updated');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Prompt update failed');
+    }
   };
 
-  const onInstall = (data: InstallForm) => {
+  const onInstall = async (data: InstallForm) => {
     setInstalling(true);
-    setInstallProgress(0);
-    // TODO: Backend integration — POST /api/models/install with { repoId, filename, type }
-    const interval = setInterval(() => {
-      setInstallProgress(prev => {
-        if (prev >= 100) {
-          clearInterval(interval);
-          setInstalling(false);
-          const newModel: ModelEntry = {
-            id: `model-new-${Date.now()}`,
-            name: data.filename.replace('.gguf', ''),
-            repoId: data.repoId,
-            filename: data.filename,
-            type: data.modelType,
-            size: '—',
-            status: 'ready',
-            vram: '—',
-            selected: false,
-            hidden: false,
-            systemPrompt: '',
-            quantization: data.quantization || 'Q4_K_M',
-          };
-          setModels(prev => [...prev, newModel]);
-          reset();
-          toast.success(`Model installed: ${data.filename}`);
-          return 100;
-        }
-        return prev + 2;
-      });
-    }, 80);
+    setInstallProgress(25);
+    try {
+      const payload = await postJson<ModelResponse>('/models/install', data, true);
+      setInstallProgress(100);
+      setModels(prev => [...prev, payload.model]);
+      reset();
+      toast.success(`Model registered: ${data.filename}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Install failed');
+    } finally {
+      setInstalling(false);
+    }
   };
 
   // Compatibility check
-  const textModels = models.filter(m => m.type === 'text' || m.type === 'code');
   const visionModels = models.filter(m => m.type === 'vision');
   const selectedModel = models.find(m => m.selected);
   const compatOk = selectedModel?.type !== 'vision';
@@ -472,12 +436,15 @@ export default function AdminModelsTab() {
               )}
               {model.status === 'error' && (
                 <button
-                  onClick={() => {
-                    setModels(prev => prev.map(m => m.id === model.id ? { ...m, status: 'loading' } : m));
-                    setTimeout(() => {
-                      setModels(prev => prev.map(m => m.id === model.id ? { ...m, status: 'ready' } : m));
+                  onClick={async () => {
+                    try {
+                      setModels(prev => prev.map(m => m.id === model.id ? { ...m, status: 'loading' } : m));
+                      const payload = await postJson<ModelResponse>(`/models/${model.id}/reload`, {}, true);
+                      setModels(prev => prev.map(m => m.id === model.id ? payload.model : m));
                       toast.success(`${model.name} reloaded`);
-                    }, 2000);
+                    } catch (error) {
+                      toast.error(error instanceof Error ? error.message : 'Reload failed');
+                    }
                   }}
                   className="ttd-btn ttd-btn-amber text-[10px] px-3 py-1 flex items-center gap-1"
                   style={{ borderColor: '#ffaa00', color: '#ffaa00', background: 'rgba(255,170,0,0.1)' }}

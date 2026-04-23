@@ -1,10 +1,43 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { Activity } from 'lucide-react';
+import { getJson } from '@/lib/api';
 
 type Interval = '1min' | '30min' | '1hr' | '1day' | '1week';
+
+interface ProcessEntry {
+  id: string;
+  name: string;
+  pid: number;
+  status: string;
+  vram: string;
+  cpu: string;
+  threads: number;
+  uptime: string;
+}
+
+interface CurrentStats {
+  cpu: number;
+  ram: number;
+  gpu: number;
+  vram: number;
+  temp: number;
+  fanRpm: number;
+  totalVram: string;
+  usedVram: string;
+  totalRam: string;
+  usedRam: string;
+}
+
+interface SystemResponse {
+  ok: boolean;
+  current: CurrentStats;
+  history: Array<{ t: string; cpu: number; ram: number; gpu: number; vram: number; tps: number }>;
+  processes: ProcessEntry[];
+  system: Array<{ label: string; value: string }>;
+}
 
 function generateTimeData(interval: Interval) {
   const points = interval === '1min' ? 60 : interval === '30min' ? 30 : interval === '1hr' ? 60 : interval === '1day' ? 24 : 7;
@@ -18,33 +51,25 @@ function generateTimeData(interval: Interval) {
 
   return Array.from({ length: points }, (_, i) => ({
     t: labelFn(i),
-    cpu: Math.max(5, Math.min(95, 30 + Math.sin(i * 0.3) * 25 + Math.random() * 15)),
-    ram: Math.max(20, Math.min(90, 55 + Math.sin(i * 0.15) * 20 + Math.random() * 8)),
-    gpu: Math.max(0, Math.min(100, 40 + Math.sin(i * 0.4 + 1) * 35 + Math.random() * 12)),
-    vram: Math.max(10, Math.min(95, 62 + Math.sin(i * 0.2) * 18 + Math.random() * 6)),
-    tps: Math.max(0, Math.min(80, 28 + Math.sin(i * 0.5) * 22 + Math.random() * 10)),
+    cpu: 0,
+    ram: 0,
+    gpu: 0,
+    vram: 0,
+    tps: 0,
   }));
 }
 
-const ACTIVE_PROCESSES = [
-  { id: 'proc-001', name: 'deepseek-r1:14b', pid: 12847, status: 'active', vram: '9.2GB', cpu: '38%', threads: 16, uptime: '2h 14m' },
-  { id: 'proc-002', name: 'qwen2.5-coder:7b', pid: 13201, status: 'idle', vram: '5.1GB', cpu: '0.2%', threads: 8, uptime: '2h 14m' },
-  { id: 'proc-003', name: 'flux-dev', pid: 13589, status: 'idle', vram: '7.8GB', cpu: '0.1%', threads: 12, uptime: '1h 47m' },
-  { id: 'proc-004', name: 'ttd-api-server', pid: 9102, status: 'active', vram: '—', cpu: '1.4%', threads: 4, uptime: '4h 02m' },
-  { id: 'proc-005', name: 'mysql-daemon', pid: 8844, status: 'active', vram: '—', cpu: '0.8%', threads: 2, uptime: '4h 02m' },
-];
-
 const CURRENT_STATS = {
-  cpu: 42,
-  ram: 67,
-  gpu: 55,
-  vram: 72,
-  temp: 71,
-  fanRpm: 2340,
-  totalVram: '24GB',
-  usedVram: '17.3GB',
-  totalRam: '64GB',
-  usedRam: '42.9GB',
+  cpu: 0,
+  ram: 0,
+  gpu: 0,
+  vram: 0,
+  temp: 0,
+  fanRpm: 0,
+  totalVram: '-',
+  usedVram: '-',
+  totalRam: '-',
+  usedRam: '-',
 };
 
 function CustomTooltip({ active, payload, label }: { active?: boolean; payload?: { name: string; value: number; color: string }[]; label?: string }) {
@@ -65,9 +90,28 @@ function CustomTooltip({ active, payload, label }: { active?: boolean; payload?:
 
 export default function AdminServerTab() {
   const [interval, setInterval] = useState<Interval>('30min');
-  const data = generateTimeData(interval);
+  const [data, setData] = useState(generateTimeData('30min'));
+  const [currentStats, setCurrentStats] = useState(CURRENT_STATS);
+  const [processes, setProcesses] = useState<ProcessEntry[]>([]);
+  const [systemInfo, setSystemInfo] = useState<Array<{ label: string; value: string }>>([
+    { label: 'GPU', value: 'not detected by backend' },
+    { label: 'CPU', value: 'loading' },
+    { label: 'RAM', value: 'loading' },
+    { label: 'Python', value: 'loading' },
+  ]);
 
   const INTERVALS: Interval[] = ['1min', '30min', '1hr', '1day', '1week'];
+
+  useEffect(() => {
+    getJson<SystemResponse>(`/admin/server?interval=${interval}`, true)
+      .then((payload) => {
+        setData(payload.history);
+        setCurrentStats(payload.current);
+        setProcesses(payload.processes);
+        setSystemInfo(payload.system);
+      })
+      .catch(() => undefined);
+  }, [interval]);
 
   return (
     <div className="p-6 max-w-screen-2xl mx-auto">
@@ -77,10 +121,10 @@ export default function AdminServerTab() {
           {/* Current stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {[
-              { label: 'CPU', value: CURRENT_STATS.cpu, detail: '16 cores · 5.2GHz', color: 'text-ttd-cyan', fill: 'progress-bar-fill-cyan' },
-              { label: 'RAM', value: CURRENT_STATS.ram, detail: `${CURRENT_STATS.usedRam} / ${CURRENT_STATS.totalRam}`, color: 'text-ttd-green', fill: 'progress-bar-fill-green' },
-              { label: 'GPU', value: CURRENT_STATS.gpu, detail: 'RTX 4090 · 71°C', color: 'text-ttd-amber', fill: 'progress-bar-fill-amber' },
-              { label: 'VRAM', value: CURRENT_STATS.vram, detail: `${CURRENT_STATS.usedVram} / ${CURRENT_STATS.totalVram}`, color: CURRENT_STATS.vram > 85 ? 'text-ttd-red' : 'text-ttd-purple', fill: CURRENT_STATS.vram > 85 ? 'progress-bar-fill-red' : 'progress-bar-fill-amber' },
+              { label: 'CPU', value: currentStats.cpu, detail: 'host CPU', color: 'text-ttd-cyan', fill: 'progress-bar-fill-cyan' },
+              { label: 'RAM', value: currentStats.ram, detail: `${currentStats.usedRam} / ${currentStats.totalRam}`, color: 'text-ttd-green', fill: 'progress-bar-fill-green' },
+              { label: 'GPU', value: currentStats.gpu, detail: currentStats.temp ? `GPU · ${currentStats.temp}°C` : 'GPU telemetry unavailable', color: 'text-ttd-amber', fill: 'progress-bar-fill-amber' },
+              { label: 'VRAM', value: currentStats.vram, detail: `${currentStats.usedVram} / ${currentStats.totalVram}`, color: currentStats.vram > 85 ? 'text-ttd-red' : 'text-ttd-purple', fill: currentStats.vram > 85 ? 'progress-bar-fill-red' : 'progress-bar-fill-amber' },
             ].map((stat) => (
               <div key={`stat-${stat.label}`} className="bg-ttd-surface border border-ttd-border rounded-sm px-4 py-3">
                 <div className="flex items-center justify-between mb-2">
@@ -182,10 +226,10 @@ export default function AdminServerTab() {
             <div className="px-4 py-3 border-b border-ttd-border flex items-center gap-2">
               <Activity size={13} className="text-ttd-green" />
               <span className="text-xs font-bold tracking-wider text-ttd-text">ACTIVE PROCESSES</span>
-              <span className="ml-auto text-[10px] text-ttd-muted">{ACTIVE_PROCESSES.length} running</span>
+              <span className="ml-auto text-[10px] text-ttd-muted">{processes.length} running</span>
             </div>
             <div className="divide-y divide-ttd-border/50">
-              {ACTIVE_PROCESSES.map((proc) => (
+              {processes.map((proc) => (
                 <div key={proc.id} className="px-4 py-3 hover:bg-ttd-elevated transition-colors">
                   <div className="flex items-start justify-between mb-1.5">
                     <div>
@@ -221,16 +265,7 @@ export default function AdminServerTab() {
           <div className="bg-ttd-surface border border-ttd-border rounded-sm p-4">
             <div className="text-[10px] text-ttd-muted tracking-wider mb-3">── SYSTEM INFO ──</div>
             <div className="space-y-2 text-xs">
-              {[
-                { label: 'GPU', value: 'NVIDIA RTX 4090 24GB' },
-                { label: 'CPU', value: 'AMD Ryzen 9 7950X' },
-                { label: 'RAM', value: '64GB DDR5-6000' },
-                { label: 'OS', value: 'Ubuntu 24.04 LTS' },
-                { label: 'CUDA', value: '12.4 · Driver 550.54' },
-                { label: 'Python', value: '3.12.3' },
-                { label: 'GPU Temp', value: `${CURRENT_STATS.temp}°C` },
-                { label: 'Fan', value: `${CURRENT_STATS.fanRpm} RPM` },
-              ].map((item) => (
+              {systemInfo.map((item) => (
                 <div key={`info-${item.label}`} className="flex items-center justify-between">
                   <span className="text-ttd-muted text-[10px]">{item.label}</span>
                   <span className="text-ttd-text text-[10px] font-mono text-right">{item.value}</span>

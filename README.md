@@ -1,91 +1,113 @@
-# Next.js
+# Time To Deny
 
-A modern Next.js 15 application built with TypeScript and Tailwind CSS.
+Next.js chat UI with a Django/Python backend for local AI workflows.
 
-## 🚀 Features
+## What Works
 
-- **Next.js 15** - Latest version with improved performance and features
-- **React 19** - Latest React version with enhanced capabilities
-- **Tailwind CSS** - Utility-first CSS framework for rapid UI development
+- Streaming chat responses over Server-Sent Events.
+- Persistent chats, messages, generated files, request logs, model registry, and admin sessions.
+- File attachments with stored text/data URL content.
+- Generated file cards with content preview and a backend smoke test.
+- Image generation placeholder output saved under Django media.
+- Admin login, request database, server load view, model registry actions, password change, and session log.
+- SQLite for local development, MySQL via environment variables.
+- llama.cpp integration through `llama-server` and GGUF models.
 
-## 🛠️ Installation
+## Launch
 
-1. Install dependencies:
-  ```bash
-  npm install
-  # or
-  yarn install
-  ```
+By default the launchers start `llama-server` together with Django and Next.js. Put a GGUF model into `backend/models` or set `LLAMA_CPP_MODEL_PATH`.
 
-2. Start the development server:
-  ```bash
-  npm run dev
-  # or
-  yarn dev
-  ```
-3. Open [http://localhost:4028](http://localhost:4028) with your browser to see the result.
+Linux:
 
-## 📁 Project Structure
-
-```
-nextjs/
-├── public/             # Static assets
-├── src/
-│   ├── app/            # App router components
-│   │   ├── layout.tsx  # Root layout component
-│   │   └── page.tsx    # Main page component
-│   ├── components/     # Reusable UI components
-│   ├── styles/         # Global styles and Tailwind configuration
-├── next.config.mjs     # Next.js configuration
-├── package.json        # Project dependencies and scripts
-├── postcss.config.js   # PostCSS configuration
-└── tailwind.config.js  # Tailwind CSS configuration
-
+```bash
+./launchers/linux.sh
 ```
 
-## 🧩 Page Editing
+Windows:
 
-You can start editing the page by modifying `src/app/page.tsx`. The page auto-updates as you edit the file.
+```bat
+launchers\windows.bat
+```
 
-## 🎨 Styling
+The launchers start:
 
-This project uses Tailwind CSS for styling with the following features:
-- Utility-first approach for rapid development
-- Custom theme configuration
-- Responsive design utilities
-- PostCSS and Autoprefixer integration
+- llama.cpp: `http://127.0.0.1:8080`
+- Frontend: `http://127.0.0.1:4028`
+- Backend API: `http://127.0.0.1:8000/api`
+- Admin panel: `http://127.0.0.1:4028/admin-panel`
 
-## 📦 Available Scripts
+## Manual Backend
 
-- `npm run dev` - Start development server on port 4028
-- `npm run build` - Build the application for production
-- `npm run start` - Start the development server
-- `npm run serve` - Start the production server
-- `npm run lint` - Run ESLint to check code quality
-- `npm run lint:fix` - Fix ESLint issues automatically
-- `npm run format` - Format code with Prettier
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r backend/requirements.txt
+python backend/manage.py migrate
+python backend/manage.py shell -c "from core.seed import ensure_defaults; ensure_defaults()"
+python backend/manage.py runserver 127.0.0.1:8000
+```
 
-## 📱 Deployment
+## Manual Frontend
 
-Build the application for production:
+```bash
+npm install
+NEXT_PUBLIC_API_BASE=http://127.0.0.1:8000/api npm run dev
+```
 
-  ```bash
-  npm run build
-  ```
+## MySQL
 
-## 📚 Learn More
+Set these before running migrations:
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+export MYSQL_DATABASE=timetodeny
+export MYSQL_USER=ttd
+export MYSQL_PASSWORD=change-me
+export MYSQL_HOST=127.0.0.1
+export MYSQL_PORT=3306
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial
+Without `MYSQL_DATABASE`, Django uses `backend/db.sqlite3`.
 
-You can check out the [Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## llama.cpp Model Backend
 
-## 🙏 Acknowledgments
+The model core is `llama.cpp`. The backend streams text requests through `llama-server` when `TTD_MODEL_BACKEND=llamacpp`.
 
-- Built with [Rocket.new](https://rocket.new)
-- Powered by Next.js and React
-- Styled with Tailwind CSS
+Run an existing llama.cpp server:
 
-Built with ❤️ on Rocket.new
+```bash
+llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8080 -c 8192
+export TTD_MODEL_BACKEND=llamacpp
+export TTD_LLAMA_CPP_URL=http://127.0.0.1:8080
+```
+
+Or let the launcher find and start it:
+
+```bash
+mkdir -p backend/models
+cp /path/to/model.gguf backend/models/
+./launchers/linux.sh
+```
+
+Windows PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force backend\models
+Copy-Item C:\models\model.gguf backend\models\
+launchers\windows.bat
+```
+
+Useful llama.cpp env vars:
+
+- `TTD_LLAMA_CPP_URL`: Django target URL, default `http://127.0.0.1:8080`.
+- `LLAMA_CPP_MODEL_PATH`: GGUF file the launcher passes to `llama-server`.
+- `LLAMA_CPP_BIN`: llama.cpp server binary, default `llama-server`.
+- `LLAMA_CPP_CTX_SIZE`: context size passed to launcher, default `8192`.
+- `LLAMA_CPP_THREADS`: optional thread count.
+- `LLAMA_CPP_GPU_LAYERS`: optional GPU layer count.
+- `TTD_LLAMA_CPP_N_PREDICT`: max generated tokens per request, default `1024`.
+
+`mock` remains available for UI/backend smoke tests, because debugging CSS while waiting for a 14B model to wake up is punishment, not engineering.
+
+```bash
+TTD_MODEL_BACKEND=mock ./launchers/linux.sh
+```

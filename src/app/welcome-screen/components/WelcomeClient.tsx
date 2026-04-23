@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import ChatHistorySidebar from './ChatHistorySidebar';
+import { getJson } from '@/lib/api';
 
 const ASCII_LOGO_FULL = `
  ████████╗██╗███╗   ███╗███████╗    ████████╗ ██████╗     ██████╗ ███████╗███╗   ██╗██╗   ██╗
@@ -12,21 +13,26 @@ const ASCII_LOGO_FULL = `
     ██║   ██║██║ ╚═╝ ██║███████╗       ██║   ╚██████╔╝    ██████╔╝███████╗██║ ╚████║   ██║   
     ╚═╝   ╚═╝╚═╝     ╚═╝╚══════╝       ╚═╝    ╚═════╝     ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝  `;
 
-const RECENT_CHATS = [
-  { id: 'chat-001', title: 'Rust async runtime deep dive', model: 'deepseek-r1:14b', mode: 'expert', ts: '2026-04-23 11:22', msgs: 34 },
-  { id: 'chat-002', title: 'Generate FastAPI boilerplate', model: 'qwen2.5-coder:7b', mode: 'instant', ts: '2026-04-23 09:14', msgs: 12 },
-  { id: 'chat-003', title: 'Image: cyberpunk city at dusk', model: 'flux-dev', mode: 'instant', ts: '2026-04-22 23:47', msgs: 3 },
-  { id: 'chat-004', title: 'Explain transformer attention', model: 'llama3.3:70b', mode: 'expert', ts: '2026-04-22 18:30', msgs: 28 },
-  { id: 'chat-005', title: 'Write unit tests for auth module', model: 'qwen2.5-coder:7b', mode: 'instant', ts: '2026-04-22 14:05', msgs: 19 },
-  { id: 'chat-006', title: 'Docker compose for ML stack', model: 'deepseek-r1:14b', mode: 'expert', ts: '2026-04-21 20:11', msgs: 9 },
-  { id: 'chat-007', title: 'Summarize arxiv: Mamba2 paper', model: 'llama3.3:70b', mode: 'instant', ts: '2026-04-21 16:44', msgs: 6 },
-  { id: 'chat-008', title: 'CUDA kernel optimization tips', model: 'deepseek-r1:14b', mode: 'expert', ts: '2026-04-20 22:18', msgs: 41 },
-];
+interface ChatEntry {
+  id: string;
+  title: string;
+  model: string;
+  mode: string;
+  ts: string;
+  msgs: number;
+}
+
+interface ChatsResponse {
+  ok: boolean;
+  chats: ChatEntry[];
+}
 
 export default function WelcomeClient() {
   const router = useRouter();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [logoGlitch, setLogoGlitch] = useState(false);
+  const [recentChats, setRecentChats] = useState<ChatEntry[]>([]);
+  const [readyModel, setReadyModel] = useState('deepseek-r1:14b ready');
 
   useEffect(() => {
     const glitchInterval = setInterval(() => {
@@ -34,6 +40,18 @@ export default function WelcomeClient() {
       setTimeout(() => setLogoGlitch(false), 300);
     }, 8000);
     return () => clearInterval(glitchInterval);
+  }, []);
+
+  useEffect(() => {
+    getJson<ChatsResponse>('/chats')
+      .then(payload => setRecentChats(payload.chats.slice(0, 8)))
+      .catch(() => undefined);
+    getJson<{ ok: boolean; models: Array<{ name: string; selected: boolean; status: string }> }>('/models')
+      .then(payload => {
+        const selected = payload.models.find(model => model.selected) || payload.models[0];
+        if (selected) setReadyModel(`${selected.name} ${selected.status}`);
+      })
+      .catch(() => undefined);
   }, []);
 
   const handleStart = () => {
@@ -61,7 +79,7 @@ export default function WelcomeClient() {
         <div className="ml-auto flex items-center gap-3">
           <div className="flex items-center gap-1.5">
             <span className="status-dot status-dot-green" />
-            <span className="text-xs text-ttd-muted">deepseek-r1:14b ready</span>
+            <span className="text-xs text-ttd-muted">{readyModel}</span>
           </div>
           <button
             onClick={() => router?.push('/admin-panel')}
@@ -94,7 +112,7 @@ export default function WelcomeClient() {
       {sidebarOpen && (
         <div className="fixed inset-0 z-50 flex">
           <div className="sidebar-overlay flex-1" onClick={() => setSidebarOpen(false)} />
-          <ChatHistorySidebar chats={RECENT_CHATS} onClose={() => setSidebarOpen(false)} />
+          <ChatHistorySidebar chats={recentChats} onClose={() => setSidebarOpen(false)} />
         </div>
       )}
     </div>

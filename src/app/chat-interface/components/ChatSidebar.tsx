@@ -1,22 +1,24 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { X, MessageSquare, Zap, Brain, Image, Trash2, Search } from 'lucide-react';
 import { toast } from 'sonner';
+import { deleteJson, getJson } from '@/lib/api';
 
-const CHATS = [
-  { id: 'chat-001', title: 'Rust async runtime deep dive', model: 'deepseek-r1:14b', mode: 'expert', ts: '11:22', msgs: 34 },
-  { id: 'chat-002', title: 'Generate FastAPI boilerplate', model: 'qwen2.5-coder:7b', mode: 'instant', ts: '09:14', msgs: 12 },
-  { id: 'chat-003', title: 'Image: cyberpunk city at dusk', model: 'flux-dev', mode: 'instant', ts: 'Yesterday', msgs: 3 },
-  { id: 'chat-004', title: 'Explain transformer attention', model: 'llama3.3:70b', mode: 'expert', ts: 'Yesterday', msgs: 28 },
-  { id: 'chat-005', title: 'Write unit tests for auth module', model: 'qwen2.5-coder:7b', mode: 'instant', ts: 'Yesterday', msgs: 19 },
-  { id: 'chat-006', title: 'Docker compose for ML stack', model: 'deepseek-r1:14b', mode: 'expert', ts: 'Mon', msgs: 9 },
-  { id: 'chat-007', title: 'Summarize arxiv: Mamba2 paper', model: 'llama3.3:70b', mode: 'instant', ts: 'Mon', msgs: 6 },
-  { id: 'chat-008', title: 'CUDA kernel optimization tips', model: 'deepseek-r1:14b', mode: 'expert', ts: 'Sun', msgs: 41 },
-  { id: 'chat-009', title: 'Build a Zig HTTP server', model: 'qwen2.5-coder:7b', mode: 'instant', ts: 'Sat', msgs: 22 },
-  { id: 'chat-010', title: 'Diffusion model math explained', model: 'llama3.3:70b', mode: 'expert', ts: 'Fri', msgs: 15 },
-];
+interface ChatEntry {
+  id: string;
+  title: string;
+  model: string;
+  mode: string;
+  ts: string;
+  msgs: number;
+}
+
+interface ChatsResponse {
+  ok: boolean;
+  chats: ChatEntry[];
+}
 
 interface Props {
   onClose: () => void;
@@ -25,17 +27,28 @@ interface Props {
 export default function ChatSidebar({ onClose }: Props) {
   const router = useRouter();
   const [search, setSearch] = useState('');
-  const [chats, setChats] = useState(CHATS);
+  const [chats, setChats] = useState<ChatEntry[]>([]);
+
+  useEffect(() => {
+    getJson<ChatsResponse>('/chats')
+      .then(payload => setChats(payload.chats))
+      .catch((error: Error) => toast.error(error.message));
+  }, []);
 
   const filtered = chats.filter(c =>
     c.title.toLowerCase().includes(search.toLowerCase()) ||
     c.model.toLowerCase().includes(search.toLowerCase())
   );
 
-  const handleDelete = (id: string, e: React.MouseEvent) => {
+  const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setChats(prev => prev.filter(c => c.id !== id));
-    toast.success('Conversation deleted');
+    try {
+      await deleteJson(`/chats/${id}`);
+      setChats(prev => prev.filter(c => c.id !== id));
+      toast.success('Conversation deleted');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Delete failed');
+    }
   };
 
   const handleSelect = (id: string, mode: string) => {

@@ -22,6 +22,10 @@ function CodeBlock({ file }: { file: GeneratedFile }) {
   };
 
   const handleDownload = () => {
+    if (file.type === 'image_url') {
+      window.open(file.content, '_blank', 'noopener,noreferrer');
+      return;
+    }
     const blob = new Blob([file.content], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -31,6 +35,33 @@ function CodeBlock({ file }: { file: GeneratedFile }) {
     URL.revokeObjectURL(url);
     toast.success(`Downloaded ${file.name}`);
   };
+
+  if (file.type === 'image_url') {
+    return (
+      <div className="mt-3 border border-ttd-border rounded-sm overflow-hidden">
+        <div className="flex items-center justify-between px-3 py-2 bg-ttd-elevated border-b border-ttd-border">
+          <div className="flex items-center gap-2">
+            <Image size={12} className="text-ttd-purple" />
+            <span className="text-xs text-ttd-purple font-semibold">{file.name}</span>
+            <span className="text-[10px] text-ttd-muted border border-ttd-border px-1 py-0.5 rounded-sm uppercase">
+              {file.language || 'image'}
+            </span>
+          </div>
+          <button
+            onClick={handleDownload}
+            className="ttd-btn ttd-btn-ghost px-2 py-0.5 text-[10px] flex items-center gap-1"
+          >
+            <Download size={10} />
+            OPEN
+          </button>
+        </div>
+        <div className="bg-ttd-card p-3">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={file.content} alt={file.name} className="max-h-96 w-full object-contain border border-ttd-border rounded-sm" />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="mt-3 border border-ttd-border rounded-sm overflow-hidden">

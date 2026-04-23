@@ -1,20 +1,36 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Zap, Brain, ChevronDown, Plus, Shield } from 'lucide-react';
 import type { Mode } from './ChatInterfaceClient';
+import { getJson } from '@/lib/api';
 
 const ASCII_TTD_COMPACT = `╔╦╗╔╦╗╔╦╗
  ║  ║  ║ 
  ╩  ╩  ╩ `;
 
-const AVAILABLE_MODELS = [
-  { id: 'model-deepseek', name: 'deepseek-r1:14b', type: 'TEXT', vram: '9.2GB', status: 'ready' },
-  { id: 'model-qwen', name: 'qwen2.5-coder:7b', type: 'CODE', vram: '5.1GB', status: 'idle' },
-  { id: 'model-llama', name: 'llama3.3:70b', type: 'TEXT', vram: '42GB', status: 'idle' },
-  { id: 'model-flux', name: 'flux-dev', type: 'VISION', vram: '7.8GB', status: 'idle' },
-];
+interface AvailableModel {
+  id: string;
+  name: string;
+  type: string;
+  vram: string;
+  status: string;
+  selected?: boolean;
+}
+
+interface ModelsResponse {
+  ok: boolean;
+  models: Array<{
+    id: string;
+    name: string;
+    type: string;
+    vram: string;
+    status: string;
+    selected: boolean;
+    hidden: boolean;
+  }>;
+}
 
 interface Props {
   mode: Mode;
@@ -29,6 +45,32 @@ interface Props {
 export default function ChatHeader({ mode, onModeChange, activeModel, onModelChange, isStreaming, onSidebarToggle, onNewChat }: Props) {
   const router = useRouter();
   const [modelDropOpen, setModelDropOpen] = useState(false);
+  const [models, setModels] = useState<AvailableModel[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    getJson<ModelsResponse>('/models')
+      .then((payload) => {
+        if (cancelled) return;
+        const visible = payload.models
+          .filter(model => !model.hidden)
+          .map(model => ({
+            id: model.id,
+            name: model.name,
+            type: model.type.toUpperCase(),
+            vram: model.vram,
+            status: model.status,
+            selected: model.selected,
+          }));
+        if (visible.length > 0) {
+          setModels(visible);
+          const selected = visible.find(model => model.selected);
+          if (selected && activeModel === 'deepseek-r1:14b') onModelChange(selected.name);
+        }
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [activeModel, onModelChange]);
 
   return (
     <div className="flex items-center gap-3 px-4 py-2 border-b border-ttd-border bg-ttd-surface/80 backdrop-blur-sm z-30 flex-shrink-0">
@@ -97,7 +139,7 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
             <div className="px-3 py-2 border-b border-ttd-border">
               <span className="text-[10px] text-ttd-muted tracking-wider uppercase">Select Model</span>
             </div>
-            {AVAILABLE_MODELS.map((m) => (
+            {models.map((m) => (
               <button
                 key={m.id}
                 onClick={() => { onModelChange(m.name); setModelDropOpen(false); }}

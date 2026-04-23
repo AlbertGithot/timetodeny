@@ -1,8 +1,9 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ChevronDown, ChevronRight, Search, Download } from 'lucide-react';
 import { toast } from 'sonner';
+import { apiUrl, authHeaders, getJson } from '@/lib/api';
 
 interface RequestEntry {
   id: string;
@@ -18,21 +19,6 @@ interface RequestEntry {
   errorDetails?: string;
 }
 
-const REQUESTS: RequestEntry[] = [
-  { id: 'req-001', ip: '127.0.0.1', ts: '2026-04-23 11:22:14', model: 'deepseek-r1:14b', mode: 'expert', query: 'Write a Rust async function that reads a file line by line...', response: 'Here\'s a Rust async function using Tokio...', status: 'success', latency: '2.34s', tokens: 387 },
-  { id: 'req-002', ip: '127.0.0.1', ts: '2026-04-23 11:24:02', model: 'deepseek-r1:14b', mode: 'expert', query: 'Can you also add a semaphore to limit max concurrency...', response: 'Absolutely. Using tokio::sync::Semaphore with Arc...', status: 'success', latency: '1.87s', tokens: 214 },
-  { id: 'req-003', ip: '192.168.1.44', ts: '2026-04-23 10:55:11', model: 'qwen2.5-coder:7b', mode: 'instant', query: 'Generate a FastAPI CRUD boilerplate for a users table', response: 'Here is a complete FastAPI CRUD implementation...', status: 'success', latency: '0.92s', tokens: 512 },
-  { id: 'req-004', ip: '192.168.1.44', ts: '2026-04-23 10:41:33', model: 'flux-dev', mode: 'instant', query: '/imagine cyberpunk city at dusk, neon rain, 4k', response: '[IMAGE_GENERATED: cyberpunk_city_01.png]', status: 'success', latency: '14.2s', tokens: 0 },
-  { id: 'req-005', ip: '10.0.0.2', ts: '2026-04-23 09:18:47', model: 'llama3.3:70b', mode: 'expert', query: 'Explain multi-head attention with mathematical notation', response: '', status: 'timeout', latency: '30.0s', tokens: 0, errorDetails: 'Request exceeded 30s timeout threshold. Model was mid-generation at token 847. CUDA context may be degraded — recommend model reload.' },
-  { id: 'req-006', ip: '127.0.0.1', ts: '2026-04-23 09:02:15', model: 'deepseek-r1:14b', mode: 'instant', query: 'What is the capital of France?', response: 'Paris.', status: 'success', latency: '0.21s', tokens: 4 },
-  { id: 'req-007', ip: '10.0.0.5', ts: '2026-04-23 08:44:09', model: 'qwen2.5-coder:7b', mode: 'instant', query: 'Write unit tests for a JWT auth module in Python', response: 'Here are comprehensive unit tests...', status: 'success', latency: '1.44s', tokens: 631 },
-  { id: 'req-008', ip: '10.0.0.5', ts: '2026-04-23 08:30:52', model: 'llama3.3:70b', mode: 'expert', query: 'Summarize the Mamba2 state space model paper', response: '', status: 'error', latency: '0.08s', tokens: 0, errorDetails: 'Model not loaded: llama3.3:70b is not in active state. Call /api/models/load with model_id before sending requests. Current VRAM budget: 14.2GB free.' },
-  { id: 'req-009', ip: '127.0.0.1', ts: '2026-04-22 23:47:18', model: 'flux-dev', mode: 'instant', query: '/imagine abstract data flow visualization, purple cyan', response: '[IMAGE_GENERATED: abstract_flow_01.png]', status: 'success', latency: '11.7s', tokens: 0 },
-  { id: 'req-010', ip: '192.168.1.44', ts: '2026-04-22 22:11:03', model: 'deepseek-r1:14b', mode: 'expert', query: 'Optimize this CUDA kernel for matrix multiplication...', response: 'Here are several optimization strategies...', status: 'success', latency: '3.12s', tokens: 892 },
-  { id: 'req-011', ip: '10.0.0.2', ts: '2026-04-22 21:55:40', model: 'qwen2.5-coder:7b', mode: 'instant', query: 'Build a Docker compose for a Python ML inference stack', response: 'Here is a production-ready docker-compose.yml...', status: 'success', latency: '1.09s', tokens: 448 },
-  { id: 'req-012', ip: '10.0.0.5', ts: '2026-04-22 20:03:27', model: 'deepseek-r1:14b', mode: 'expert', query: 'Explain the difference between RLHF and DPO training', response: '', status: 'streaming', latency: '—', tokens: 234 },
-];
-
 const STATUS_CONFIG = {
   success: { label: 'SUCCESS', cls: 'text-ttd-green border-ttd-green/30 bg-ttd-green/5' },
   error: { label: 'ERROR', cls: 'text-ttd-red border-ttd-red/30 bg-ttd-red/5' },
@@ -40,21 +26,34 @@ const STATUS_CONFIG = {
   streaming: { label: 'STREAMING', cls: 'text-ttd-cyan border-ttd-cyan/30 bg-ttd-cyan/5' },
 };
 
+interface RequestsResponse {
+  ok: boolean;
+  requests: RequestEntry[];
+}
+
 export default function AdminRequestsTab() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(1);
+  const [requests, setRequests] = useState<RequestEntry[]>([]);
   const perPage = 8;
 
-  const filtered = REQUESTS.filter(r => {
+  useEffect(() => {
+    getJson<RequestsResponse>('/admin/requests', true)
+      .then(payload => setRequests(payload.requests))
+      .catch((error: Error) => toast.error(error.message));
+  }, []);
+
+  const filtered = requests.filter(r => {
     const matchSearch = r.ip.includes(search) || r.query.toLowerCase().includes(search.toLowerCase()) || r.model.includes(search);
     const matchStatus = statusFilter === 'all' || r.status === statusFilter;
     return matchSearch && matchStatus;
   });
 
-  const totalPages = Math.ceil(filtered.length / perPage);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
   const paginated = filtered.slice((page - 1) * perPage, page * perPage);
+  const showingStart = filtered.length === 0 ? 0 : (page - 1) * perPage + 1;
 
   const toggleRow = (id: string) => {
     setExpandedRows(prev => {
@@ -65,14 +64,28 @@ export default function AdminRequestsTab() {
   };
 
   const handleExport = () => {
-    toast.success(`Exported ${filtered.length} records as CSV`);
+    fetch(apiUrl('/admin/requests/export'), { headers: authHeaders() })
+      .then((response) => {
+        if (!response.ok) throw new Error('Export failed');
+        return response.blob();
+      })
+      .then((blob) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'ttd_requests.csv';
+        a.click();
+        URL.revokeObjectURL(url);
+        toast.success(`Exported ${filtered.length} records as CSV`);
+      })
+      .catch((error: Error) => toast.error(error.message));
   };
 
   const counts = {
-    total: REQUESTS.length,
-    success: REQUESTS.filter(r => r.status === 'success').length,
-    error: REQUESTS.filter(r => r.status === 'error').length,
-    timeout: REQUESTS.filter(r => r.status === 'timeout').length,
+    total: requests.length,
+    success: requests.filter(r => r.status === 'success').length,
+    error: requests.filter(r => r.status === 'error').length,
+    timeout: requests.filter(r => r.status === 'timeout').length,
   };
 
   return (
@@ -212,7 +225,7 @@ export default function AdminRequestsTab() {
       {/* Pagination */}
       <div className="flex items-center justify-between mt-4">
         <span className="text-[11px] text-ttd-muted">
-          Showing {(page - 1) * perPage + 1}–{Math.min(page * perPage, filtered.length)} of {filtered.length} requests
+          Showing {showingStart}–{Math.min(page * perPage, filtered.length)} of {filtered.length} requests
         </span>
         <div className="flex items-center gap-1">
           <button

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Shield, ArrowLeft, Lock } from 'lucide-react';
 import { toast } from 'sonner';
@@ -8,8 +8,18 @@ import AdminRequestsTab from './AdminRequestsTab';
 import AdminServerTab from './AdminServerTab';
 import AdminModelsTab from './AdminModelsTab';
 import AdminSessionsTab from './AdminSessionsTab';
+import { clearAdminToken, getAdminToken, postJson, setAdminToken } from '@/lib/api';
 
 type Tab = 'requests' | 'server' | 'models' | 'sessions';
+
+interface LoginResponse {
+  ok: boolean;
+  token: string;
+  session: {
+    ip: string;
+    loginTime: string;
+  };
+}
 
 const ASCII_ADMIN = `
  ▄▄▄  ██▄  ██▄▄▄▄▄██ ██▄▄▄▄▄
@@ -25,20 +35,41 @@ export default function AdminPanelClient() {
   const [pwError, setPwError] = useState('');
   const [activeTab, setActiveTab] = useState<Tab>('requests');
   const [loginAttempts, setLoginAttempts] = useState(0);
+  const [sessionIp, setSessionIp] = useState('127.0.0.1');
+  const [sessionTime, setSessionTime] = useState('');
 
-  const handleLogin = (e: React.FormEvent) => {
+  useEffect(() => {
+    if (getAdminToken()) setAuthed(true);
+  }, []);
+
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    // TODO: Backend integration — POST /api/admin/auth with { password }
-    if (password === '1111') {
+    try {
+      const payload = await postJson<LoginResponse>('/admin/login', { password });
+      setAdminToken(payload.token);
       setAuthed(true);
       setPwError('');
-      toast.success('Admin session started · IP: 127.0.0.1');
-    } else {
+      setSessionIp(payload.session.ip);
+      setSessionTime(payload.session.loginTime);
+      toast.success(`Admin session started · IP: ${payload.session.ip}`);
+    } catch (error) {
       setLoginAttempts(prev => prev + 1);
       setPwError(`Invalid credentials (attempt ${loginAttempts + 1})`);
       setPassword('');
-      toast.error('Authentication failed');
+      toast.error(error instanceof Error ? error.message : 'Authentication failed');
     }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await postJson('/admin/logout', {}, true);
+    } catch {
+      // Token may already be dead; clear it locally anyway.
+    }
+    clearAdminToken();
+    setAuthed(false);
+    setPassword('');
+    toast('Admin session ended');
   };
 
   if (!authed) {
@@ -96,9 +127,7 @@ export default function AdminPanelClient() {
             </form>
 
             <div className="mt-4 pt-4 border-t border-ttd-border">
-              <div className="text-[10px] text-ttd-dim text-center">
-                Default password: 1111 · Change in Sessions tab
-              </div>
+              <div className="text-[10px] text-ttd-dim text-center">Password is configured on the backend</div>
             </div>
           </div>
 
@@ -142,11 +171,11 @@ export default function AdminPanelClient() {
         <div className="ml-auto flex items-center gap-3">
           <div className="flex items-center gap-1.5">
             <span className="status-dot status-dot-green" />
-            <span className="text-[10px] text-ttd-muted">session active · 127.0.0.1</span>
+            <span className="text-[10px] text-ttd-muted">session active · {sessionIp}</span>
           </div>
-          <span className="text-[10px] text-ttd-dim">2026-04-23 11:35:58</span>
+          <span className="text-[10px] text-ttd-dim">{sessionTime || 'active'}</span>
           <button
-            onClick={() => { setAuthed(false); setPassword(''); toast('Admin session ended'); }}
+            onClick={handleLogout}
             className="ttd-btn ttd-btn-red px-3 py-1 text-xs"
           >
             LOGOUT

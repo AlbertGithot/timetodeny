@@ -36,14 +36,28 @@ export default function ChatInputBar({
     onAttachmentsChange([]);
   };
 
-  const handleFileAttach = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const readAttachmentContent = (file: File): Promise<string> => (
+    new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onerror = () => resolve('');
+      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+      if (file.type.startsWith('image/')) {
+        reader.readAsDataURL(file);
+      } else {
+        reader.readAsText(file.slice(0, 256 * 1024));
+      }
+    })
+  );
+
+  const handleFileAttach = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    const newAttachments: Attachment[] = files.map((f, i) => ({
+    const newAttachments: Attachment[] = await Promise.all(files.map(async (f, i) => ({
       id: `att-${Date.now()}-${i}`,
       name: f.name,
       type: f.type.startsWith('image/') ? 'image' : 'file',
       size: `${(f.size / 1024).toFixed(1)}KB`,
-    }));
+      content: await readAttachmentContent(f),
+    })));
     onAttachmentsChange([...pendingAttachments, ...newAttachments]);
     toast.success(`${files.length} file(s) attached`);
     if (fileInputRef.current) fileInputRef.current.value = '';

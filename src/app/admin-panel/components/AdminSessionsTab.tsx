@@ -1,9 +1,10 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { toast } from 'sonner';
 import { UserX, Key, ChevronDown, ChevronRight, Shield, LogOut } from 'lucide-react';
+import { getJson, postJson } from '@/lib/api';
 
 interface AdminSession {
   id: string;
@@ -21,77 +22,29 @@ interface PasswordForm {
   confirmPassword: string;
 }
 
-const SESSIONS: AdminSession[] = [
-  {
-    id: 'sess-001',
-    ip: '127.0.0.1',
-    loginTime: '2026-04-23 11:35:58',
-    logoutTime: null,
-    status: 'active',
-    userAgent: 'Mozilla/5.0 · Chrome 124 · Linux',
-    actions: [
-      '11:35:58 — Authenticated successfully',
-      '11:36:12 — Viewed Request Database tab',
-      '11:36:45 — Viewed Server Load tab',
-      '11:37:02 — Viewed Models tab',
-      '11:37:30 — Updated system prompt for deepseek-r1:14b',
-      '11:38:01 — Viewed Sessions tab',
-    ],
-  },
-  {
-    id: 'sess-002',
-    ip: '192.168.1.44',
-    loginTime: '2026-04-23 09:02:11',
-    logoutTime: '2026-04-23 10:58:33',
-    status: 'ended',
-    userAgent: 'Mozilla/5.0 · Firefox 125 · Windows 11',
-    actions: [
-      '09:02:11 — Authenticated successfully',
-      '09:02:30 — Viewed Request Database tab',
-      '09:15:44 — Installed model: phi-4-q4.gguf',
-      '09:44:02 — Deleted model: mistral-7b-v0.3',
-      '10:58:33 — Session ended (logout)',
-    ],
-  },
-  {
-    id: 'sess-003',
-    ip: '10.0.0.2',
-    loginTime: '2026-04-22 22:10:05',
-    logoutTime: '2026-04-22 23:02:18',
-    status: 'ended',
-    userAgent: 'Mozilla/5.0 · Safari 17 · macOS',
-    actions: [
-      '22:10:05 — Authenticated successfully',
-      '22:10:22 — Viewed Server Load tab',
-      '22:31:09 — Changed admin password',
-      '23:02:18 — Session ended (timeout)',
-    ],
-  },
-  {
-    id: 'sess-004',
-    ip: '10.0.0.5',
-    loginTime: '2026-04-22 14:30:00',
-    logoutTime: '2026-04-22 15:11:47',
-    status: 'ended',
-    userAgent: 'Mozilla/5.0 · Chrome 124 · Ubuntu',
-    actions: [
-      '14:30:00 — Authenticated successfully',
-      '14:30:18 — Viewed Models tab',
-      '14:31:02 — Selected qwen2.5-coder:7b for responses',
-      '14:55:30 — Kicked all active sessions',
-      '15:11:47 — Session ended (logout)',
-    ],
-  },
-];
+interface SessionsResponse {
+  ok: boolean;
+  sessions: AdminSession[];
+}
 
 export default function AdminSessionsTab() {
-  const [sessions, setSessions] = useState<AdminSession[]>(SESSIONS);
+  const [sessions, setSessions] = useState<AdminSession[]>([]);
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [showPasswordForm, setShowPasswordForm] = useState(false);
   const [kickConfirm, setKickConfirm] = useState(false);
 
   const { register, handleSubmit, reset, watch, formState: { errors } } = useForm<PasswordForm>();
   const newPw = watch('newPassword');
+
+  const loadSessions = () => {
+    getJson<SessionsResponse>('/admin/sessions', true)
+      .then(payload => setSessions(payload.sessions))
+      .catch((error: Error) => toast.error(error.message));
+  };
+
+  useEffect(() => {
+    loadSessions();
+  }, []);
 
   const toggleRow = (id: string) => {
     setExpandedRows(prev => {
@@ -101,25 +54,26 @@ export default function AdminSessionsTab() {
     });
   };
 
-  const handleKickAll = () => {
-    setSessions(prev => prev.map(s =>
-      s.status === 'active'
-        ? { ...s, status: 'ended', logoutTime: new Date().toISOString().slice(0, 19).replace('T', ' ') }
-        : s
-    ));
-    setKickConfirm(false);
-    toast.success('All active sessions terminated');
+  const handleKickAll = async () => {
+    try {
+      await postJson('/admin/kick-all', {}, true);
+      setKickConfirm(false);
+      loadSessions();
+      toast.success('All active sessions terminated');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Kick failed');
+    }
   };
 
-  const onChangePassword = (data: PasswordForm) => {
-    // TODO: Backend integration — POST /api/admin/change-password with { currentPassword, newPassword }
-    if (data.currentPassword !== '1111') {
-      toast.error('Current password incorrect');
-      return;
+  const onChangePassword = async (data: PasswordForm) => {
+    try {
+      await postJson('/admin/change-password', data, true);
+      toast.success('Admin password updated successfully');
+      setShowPasswordForm(false);
+      reset();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Password update failed');
     }
-    toast.success('Admin password updated successfully');
-    setShowPasswordForm(false);
-    reset();
   };
 
   const activeSessions = sessions.filter(s => s.status === 'active');
