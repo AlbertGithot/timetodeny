@@ -1,6 +1,7 @@
 # Node modules
 node_modules/
 package-lock.json
+.runtime/
 
 # Next.js build output
 .next/

@@ -16,6 +16,10 @@ export NEXT_PUBLIC_API_BASE="${NEXT_PUBLIC_API_BASE:-http://${BACKEND_HOST}:${BA
 export TTD_FRONTEND_ORIGIN="${TTD_FRONTEND_ORIGIN:-http://127.0.0.1:${FRONTEND_PORT}}"
 export TTD_LLAMA_CPP_URL="${TTD_LLAMA_CPP_URL:-http://${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}}"
 
+if [ -x "${ROOT_DIR}/.runtime/node/current/bin/node" ]; then
+  export PATH="${ROOT_DIR}/.runtime/node/current/bin:${PATH}"
+fi
+
 if ! command -v python3 >/dev/null 2>&1; then
   echo "python3 is required"
   exit 1
