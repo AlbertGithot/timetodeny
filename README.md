@@ -17,6 +17,17 @@ Next.js chat UI with a Django/Python backend for local AI workflows.
 
 This is the Linux branch. It contains the shared Django/Next.js code and the Linux launcher only.
 
+## Project Layout
+
+- `manage.py` — Django entrypoint from the repository root.
+- `backend/timetodeny/` — Django project settings, URLs, ASGI/WSGI.
+- `backend/core/` — app models, API views, serializers, llama.cpp service, tests.
+- `backend/requirements.txt` — Python dependencies.
+- `backend/models/` — local GGUF models; ignored by git.
+- `backend/media/` — generated files/images; ignored by git.
+- `src/` — Next.js frontend.
+- `launchers/linux.sh` — Linux launcher that starts llama.cpp, Django, and Next.js.
+
 ## Launch
 
 By default the launcher starts `llama-server` together with Django and Next.js. Put a GGUF model into `backend/models` or set `LLAMA_CPP_MODEL_PATH`.
@@ -38,9 +49,9 @@ The launcher starts:
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r backend/requirements.txt
-python backend/manage.py migrate
-python backend/manage.py shell -c "from core.seed import ensure_defaults; ensure_defaults()"
-python backend/manage.py runserver 127.0.0.1:8000
+python manage.py migrate
+python manage.py shell -c "from core.seed import ensure_defaults; ensure_defaults()"
+python manage.py runserver 127.0.0.1:8000
 ```
 
 ## Manual Frontend

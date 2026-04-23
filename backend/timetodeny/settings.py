@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-PROJECT_ROOT = BASE_DIR.parent
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = BACKEND_DIR.parent
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-change-me")
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
@@ -77,7 +77,7 @@ else:
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
-            "NAME": BASE_DIR / "db.sqlite3",
+            "NAME": BACKEND_DIR / "db.sqlite3",
         }
     }
 
@@ -88,7 +88,7 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 MEDIA_URL = "/media/"
-MEDIA_ROOT = Path(os.environ.get("TTD_MEDIA_ROOT", BASE_DIR / "media"))
+MEDIA_ROOT = Path(os.environ.get("TTD_MEDIA_ROOT", BACKEND_DIR / "media"))
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -97,7 +97,7 @@ TTD_MODEL_BACKEND = os.environ.get("TTD_MODEL_BACKEND", "mock").lower()
 TTD_LLAMA_CPP_URL = os.environ.get("TTD_LLAMA_CPP_URL", "http://127.0.0.1:8080")
 TTD_LLAMA_CPP_N_PREDICT = int(os.environ.get("TTD_LLAMA_CPP_N_PREDICT", "1024"))
 TTD_LLAMA_CPP_CTX_SIZE = int(os.environ.get("TTD_LLAMA_CPP_CTX_SIZE", "8192"))
-TTD_MODEL_DIR = Path(os.environ.get("TTD_MODEL_DIR", BASE_DIR / "models"))
+TTD_MODEL_DIR = Path(os.environ.get("TTD_MODEL_DIR", BACKEND_DIR / "models"))
 TTD_GENERATED_DIR = Path(os.environ.get("TTD_GENERATED_DIR", MEDIA_ROOT / "generated"))
 TTD_REQUEST_TIMEOUT_SECONDS = int(os.environ.get("TTD_REQUEST_TIMEOUT_SECONDS", "120"))
 TTD_ALLOW_HF_DOWNLOAD = os.environ.get("TTD_ALLOW_HF_DOWNLOAD", "0")

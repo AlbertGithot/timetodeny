@@ -40,8 +40,8 @@ if [ ! -d "node_modules" ]; then
   npm install
 fi
 
-"$PYTHON" backend/manage.py migrate --noinput
-"$PYTHON" backend/manage.py shell -c "from core.seed import ensure_defaults; ensure_defaults()"
+"$PYTHON" manage.py migrate --noinput
+"$PYTHON" manage.py shell -c "from core.seed import ensure_defaults; ensure_defaults()"
 
 cleanup() {
   if [ -n "${BACKEND_PID:-}" ]; then
@@ -96,7 +96,7 @@ if [ "$TTD_MODEL_BACKEND" = "llamacpp" ]; then
   echo "llama.cpp: ${TTD_LLAMA_CPP_URL}"
 fi
 
-"$PYTHON" backend/manage.py runserver "${BACKEND_HOST}:${BACKEND_PORT}" &
+"$PYTHON" manage.py runserver "${BACKEND_HOST}:${BACKEND_PORT}" &
 BACKEND_PID=$!
 
 echo "Backend:  http://${BACKEND_HOST}:${BACKEND_PORT}"
