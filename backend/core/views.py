@@ -8,7 +8,7 @@ from uuid import UUID
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.db.models import Count
-from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
+from django.http import HttpRequest, HttpResponse, HttpResponseRedirect, StreamingHttpResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
@@ -32,6 +32,22 @@ from .services import (
     wants_image,
 )
 from .utils import client_ip, json_response, log_admin_action, make_token, parse_json, require_admin, sse, user_agent
+
+
+def index(request: HttpRequest):
+    return HttpResponseRedirect(settings.TTD_FRONTEND_ORIGIN)
+
+
+def api_index(request: HttpRequest):
+    return json_response(
+        {
+            "ok": True,
+            "service": "timetodeny-backend",
+            "frontend": settings.TTD_FRONTEND_ORIGIN,
+            "health": "/api/health",
+            "note": "Open the frontend URL for the chat UI. Django serves the API, not the Next.js page.",
+        }
+    )
 
 
 def health(request: HttpRequest):
