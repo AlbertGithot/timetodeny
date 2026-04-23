@@ -5,6 +5,8 @@ from django.urls import path
 from core import views
 
 urlpatterns = [
+    path("", views.index),
+    path("api", views.api_index),
     path("api/health", views.health),
     path("api/chats", views.chats_collection),
     path("api/chats/<uuid:chat_id>", views.chat_detail),
