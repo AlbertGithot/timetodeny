@@ -13,23 +13,19 @@ Next.js chat UI with a Django/Python backend for local AI workflows.
 - SQLite for local development, MySQL via environment variables.
 - llama.cpp integration through `llama-server` and GGUF models.
 
+## Branch
+
+This is the Linux branch. It contains the shared Django/Next.js code and the Linux launcher only.
+
 ## Launch
 
-By default the launchers start `llama-server` together with Django and Next.js. Put a GGUF model into `backend/models` or set `LLAMA_CPP_MODEL_PATH`.
-
-Linux:
+By default the launcher starts `llama-server` together with Django and Next.js. Put a GGUF model into `backend/models` or set `LLAMA_CPP_MODEL_PATH`.
 
 ```bash
 ./launchers/linux.sh
 ```
 
-Windows:
-
-```bat
-launchers\windows.bat
-```
-
-The launchers start:
+The launcher starts:
 
 - llama.cpp: `http://127.0.0.1:8080`
 - Frontend: `http://127.0.0.1:4028`
@@ -86,14 +82,6 @@ Or let the launcher find and start it:
 mkdir -p backend/models
 cp /path/to/model.gguf backend/models/
 ./launchers/linux.sh
-```
-
-Windows PowerShell:
-
-```powershell
-New-Item -ItemType Directory -Force backend\models
-Copy-Item C:\models\model.gguf backend\models\
-launchers\windows.bat
 ```
 
 Useful llama.cpp env vars:
