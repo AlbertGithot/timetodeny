@@ -58,10 +58,11 @@ class ApiSmokeTests(TestCase):
         self.assertEqual(allowed.status_code, 200)
         self.assertTrue(allowed.json()["ok"])
 
-    def test_root_redirects_to_frontend(self) -> None:
+    def test_root_explains_frontend_url(self) -> None:
         response = self.client.get("/")
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["Location"], "http://127.0.0.1:4028")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Time To Deny backend is running")
+        self.assertContains(response, "http://127.0.0.1:4028")
 
     def test_api_index_explains_backend(self) -> None:
         response = self.client.get("/api")

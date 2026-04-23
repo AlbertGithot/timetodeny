@@ -8,7 +8,7 @@ from uuid import UUID
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.db.models import Count
-from django.http import HttpRequest, HttpResponse, HttpResponseRedirect, StreamingHttpResponse
+from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
@@ -35,7 +35,31 @@ from .utils import client_ip, json_response, log_admin_action, make_token, parse
 
 
 def index(request: HttpRequest):
-    return HttpResponseRedirect(settings.TTD_FRONTEND_ORIGIN)
+    html = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Time To Deny Backend</title>
+    <style>
+      body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #050607; color: #d7fff2; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
+      main {{ width: min(760px, calc(100vw - 32px)); border: 1px solid rgba(0, 255, 136, .35); padding: 24px; background: rgba(0, 255, 136, .04); }}
+      h1 {{ margin: 0 0 12px; font-size: 20px; color: #00ff88; }}
+      p {{ color: #9bb8b0; line-height: 1.6; }}
+      a {{ color: #00ccff; }}
+      code {{ color: #00ff88; }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Time To Deny backend is running</h1>
+      <p>Django is the API server. The chat UI is served by Next.js at <a href="{settings.TTD_FRONTEND_ORIGIN}">{settings.TTD_FRONTEND_ORIGIN}</a>.</p>
+      <p>If that link does not open, the frontend process is not running. Start the project with <code>./launchers/linux.sh</code> so llama.cpp, Django, and Next.js come up together.</p>
+      <p>API health: <a href="/api/health">/api/health</a></p>
+    </main>
+  </body>
+</html>"""
+    return HttpResponse(html)
 
 
 def api_index(request: HttpRequest):
