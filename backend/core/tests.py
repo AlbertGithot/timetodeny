@@ -58,6 +58,16 @@ class ApiSmokeTests(TestCase):
         self.assertEqual(allowed.status_code, 200)
         self.assertTrue(allowed.json()["ok"])
 
+    def test_root_redirects_to_frontend(self) -> None:
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "http://127.0.0.1:4028")
+
+    def test_api_index_explains_backend(self) -> None:
+        response = self.client.get("/api")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["health"], "/api/health")
+
     @patch("urllib.request.urlopen", return_value=FakeLlamaResponse())
     def test_llamacpp_stream_parser(self, _urlopen) -> None:
         tokens = list(stream_llamacpp("Say hello", "instant", "test-model", ""))
