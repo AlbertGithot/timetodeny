@@ -46,8 +46,8 @@ if (-not (Test-Path "node_modules")) {
   npm install
 }
 
-& $Python backend\manage.py migrate --noinput
-& $Python backend\manage.py shell -c "from core.seed import ensure_defaults; ensure_defaults()"
+& $Python manage.py migrate --noinput
+& $Python manage.py shell -c "from core.seed import ensure_defaults; ensure_defaults()"
 
 $Llama = $null
 if ($env:TTD_MODEL_BACKEND -eq "llamacpp" -and -not $env:LLAMA_CPP_MODEL_PATH) {
@@ -88,7 +88,7 @@ if ($env:TTD_MODEL_BACKEND -eq "llamacpp") {
 }
 
 $Backend = Start-Process -FilePath $Python `
-  -ArgumentList "backend\manage.py", "runserver", "${BackendHost}:${BackendPort}" `
+  -ArgumentList "manage.py", "runserver", "${BackendHost}:${BackendPort}" `
   -PassThru `
   -NoNewWindow
 
