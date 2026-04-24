@@ -790,6 +790,37 @@ ensure_node_runtime() {
 
 add_local_node_to_path
 
+print_python_package_help() {
+  echo "Python pip/venv support is missing for this python3 install."
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "On Debian/Ubuntu run:"
+    echo "  apt update && apt install -y python3-venv python3-pip"
+    echo "Then recreate the local virtualenv:"
+    echo "  rm -rf .venv && ./linux.sh"
+  else
+    echo "Install python3-venv/python3-pip for your distro, then run:"
+    echo "  rm -rf .venv && ./linux.sh"
+  fi
+}
+
+ensure_python_pip() {
+  local python_bin="$1"
+
+  if "$python_bin" -m pip --version >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "pip is missing in ${python_bin}. Trying ensurepip..."
+  if "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1; then
+    if "$python_bin" -m pip --version >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+
+  print_python_package_help
+  return 1
+}
+
 prepare_runtime_environment() {
   ensure_runtime_dirs
   auto_update_repo "$ACTION" "$@"
@@ -806,11 +837,24 @@ prepare_runtime_environment() {
   fi
 
   if [ ! -d ".venv" ]; then
-    python3 -m venv .venv
+    if ! python3 -m venv .venv; then
+      echo "Failed to create Python virtualenv."
+      print_python_package_help
+      exit 1
+    fi
   fi
 
   PYTHON=".venv/bin/python"
+  if [ ! -x "$PYTHON" ]; then
+    echo ".venv exists, but ${PYTHON} is missing or not executable."
+    echo "Remove the broken virtualenv and run the launcher again:"
+    echo "  rm -rf .venv && ./linux.sh"
+    exit 1
+  fi
   export PYTHON
+  if ! ensure_python_pip "$PYTHON"; then
+    exit 1
+  fi
   if [ "$TTD_UPGRADE_PIP" = "1" ]; then
     "$PYTHON" -m pip install --disable-pip-version-check --upgrade pip
   fi

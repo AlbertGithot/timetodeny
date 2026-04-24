@@ -22,6 +22,13 @@ This is the Linux branch. It contains the shared Django/Next.js code and the Lin
 
 For a real Linux server, keep the project in `/opt/timetodeny`. `/root/project/linux/timetodeny` also works, but `/opt/timetodeny` is cleaner for a long-running service.
 
+Install the base server packages first:
+
+```bash
+apt update
+apt install -y python3 python3-venv python3-pip git cmake build-essential
+```
+
 ```bash
 cd /opt
 git clone --branch linux --single-branch https://github.com/AlbertGithot/timetodeny.git timetodeny
