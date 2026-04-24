@@ -31,6 +31,7 @@ This is the Linux branch. It contains the shared Django/Next.js code and the Lin
 ## Launch
 
 By default the launcher starts `llama-server` together with Django and Next.js. Put a GGUF model into `backend/models` or set `LLAMA_CPP_MODEL_PATH`.
+If `node`/`npm` is missing on Linux, `./linux.sh` downloads a local runtime into `.runtime/node` automatically.
 
 ```bash
 ./linux.sh
