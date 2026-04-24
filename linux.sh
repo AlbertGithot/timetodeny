@@ -81,7 +81,7 @@ if [ "$TTD_MODEL_BACKEND" = "llamacpp" ]; then
     echo "No GGUF model found."
     echo "Put a .gguf file into: $TTD_MODEL_DIR"
     echo "Or set LLAMA_CPP_MODEL_PATH=/full/path/model.gguf"
-    echo "For UI-only dev without llama.cpp: TTD_MODEL_BACKEND=mock ./launchers/linux.sh"
+    echo "For UI-only dev without llama.cpp: TTD_MODEL_BACKEND=mock ./linux.sh"
     exit 1
   fi
   if [ ! -f "$LLAMA_CPP_MODEL_PATH" ]; then

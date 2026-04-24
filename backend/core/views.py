@@ -54,7 +54,7 @@ def index(request: HttpRequest):
     <main>
       <h1>Time To Deny backend is running</h1>
       <p>Django is the API server. The chat UI is served by Next.js at <a href="{settings.TTD_FRONTEND_ORIGIN}">{settings.TTD_FRONTEND_ORIGIN}</a>.</p>
-      <p>If that link does not open, the frontend process is not running. Start the project with <code>./launchers/linux.sh</code> so llama.cpp, Django, and Next.js come up together.</p>
+      <p>If that link does not open, the frontend process is not running. Start the project with <code>./linux.sh</code> so llama.cpp, Django, and Next.js come up together.</p>
       <p>API health: <a href="/api/health">/api/health</a></p>
     </main>
   </body>

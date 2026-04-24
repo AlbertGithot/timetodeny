@@ -26,14 +26,14 @@ This is the Linux branch. It contains the shared Django/Next.js code and the Lin
 - `backend/models/` — local GGUF models; ignored by git.
 - `backend/media/` — generated files/images; ignored by git.
 - `frontend/` — Next.js app, source, assets, and config files.
-- `launchers/linux.sh` — Linux launcher that starts llama.cpp, Django, and Next.js.
+- `linux.sh` — Linux launcher that starts llama.cpp, Django, and Next.js.
 
 ## Launch
 
 By default the launcher starts `llama-server` together with Django and Next.js. Put a GGUF model into `backend/models` or set `LLAMA_CPP_MODEL_PATH`.
 
 ```bash
-./launchers/linux.sh
+./linux.sh
 ```
 
 The launcher starts:
@@ -93,7 +93,7 @@ Or let the launcher find and start it:
 ```bash
 mkdir -p backend/models
 cp /path/to/model.gguf backend/models/
-./launchers/linux.sh
+./linux.sh
 ```
 
 Useful llama.cpp env vars:
@@ -109,5 +109,5 @@ Useful llama.cpp env vars:
 `mock` remains available for UI/backend smoke tests, because debugging CSS while waiting for a 14B model to wake up is punishment, not engineering.
 
 ```bash
-TTD_MODEL_BACKEND=mock ./launchers/linux.sh
+TTD_MODEL_BACKEND=mock ./linux.sh
 ```
