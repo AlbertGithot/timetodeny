@@ -579,6 +579,16 @@ resolve_llama_cpp_bin() {
   return 1
 }
 
+print_llama_cpp_build_help() {
+  echo "Current llama.cpp requires CMake to build llama-server."
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "On Debian/Ubuntu run:"
+    echo "  apt update && apt install -y git cmake build-essential"
+  else
+    echo "Install git, cmake, and a C++ build toolchain for your distro."
+  fi
+}
+
 bootstrap_llama_cpp() {
   local repo_dir build_dir jobs candidate=""
 
@@ -591,8 +601,9 @@ bootstrap_llama_cpp() {
     return 1
   fi
 
-  if ! command -v cmake >/dev/null 2>&1 && ! command -v make >/dev/null 2>&1; then
-    echo "Cannot bootstrap llama.cpp automatically: install cmake or make first"
+  if ! command -v cmake >/dev/null 2>&1; then
+    echo "Cannot bootstrap llama.cpp automatically: cmake is not installed"
+    print_llama_cpp_build_help
     return 1
   fi
 
@@ -623,27 +634,23 @@ bootstrap_llama_cpp() {
     fi
   fi
 
-  if command -v cmake >/dev/null 2>&1; then
-    echo "Building llama-server with CMake..."
-    cmake -S "$repo_dir" -B "$build_dir" -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_SERVER=ON >/dev/null
-    cmake --build "$build_dir" --config Release --target llama-server -j "$jobs"
-    candidate="$(
-      first_executable_path \
-        "${build_dir}/bin/llama-server" \
-        "${build_dir}/llama-server" \
-        || true
-    )"
-  else
-    echo "Building llama-server with make..."
-    make -C "$repo_dir" -j"$jobs" llama-server
-    candidate="$(
-      first_executable_path \
-        "${repo_dir}/llama-server" \
-        "${repo_dir}/bin/llama-server" \
-        "${repo_dir}/build/bin/llama-server" \
-        || true
-    )"
+  echo "Building llama-server with CMake..."
+  if ! cmake -S "$repo_dir" -B "$build_dir" -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_SERVER=ON; then
+    echo "CMake configure failed for llama.cpp."
+    print_llama_cpp_build_help
+    return 1
   fi
+  if ! cmake --build "$build_dir" --config Release --target llama-server -j "$jobs"; then
+    echo "CMake build failed for llama-server."
+    print_llama_cpp_build_help
+    return 1
+  fi
+  candidate="$(
+    first_executable_path \
+      "${build_dir}/bin/llama-server" \
+      "${build_dir}/llama-server" \
+      || true
+  )"
 
   if [ -n "$candidate" ]; then
     LLAMA_CPP_BIN="$candidate"
@@ -882,7 +889,7 @@ prepare_runtime_environment() {
     LLAMA_CPP_BIN="${LLAMA_CPP_BIN:-}"
     if ! resolve_llama_cpp_bin && ! bootstrap_llama_cpp && ! resolve_llama_cpp_bin; then
       echo "llama-server not found. Searched PATH, ${LLAMA_SERVER_DIR}, repo directories, \$HOME/llama.cpp, \$HOME/.local/bin, /usr/local, and /opt."
-      echo "Auto-bootstrap also failed. Install build tools (git, cmake or make, and a C++ compiler) or set LLAMA_CPP_BIN manually."
+      echo "Auto-bootstrap also failed. Install build tools (git, cmake, and a C++ compiler) or set LLAMA_CPP_BIN manually."
       exit 1
     fi
     if ! resolve_llama_model_path; then
