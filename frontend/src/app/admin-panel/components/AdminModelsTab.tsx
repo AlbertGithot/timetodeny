@@ -25,12 +25,24 @@ interface ModelEntry {
 interface InstallForm {
   repoId: string;
   filename: string;
-  modelType: 'text' | 'vision';
+  modelType: 'text' | 'vision' | 'code';
   quantization: string;
 }
 
 interface SystemPromptForm {
   prompt: string;
+}
+
+interface SearchResult {
+  repoId: string;
+  name: string;
+  type: 'text' | 'vision' | 'code';
+  downloads: number;
+  likes: number;
+  pipelineTag: string;
+  updatedAt: string;
+  tags: string[];
+  ggufFiles: string[];
 }
 
 const STATUS_CONFIG = {
@@ -57,15 +69,36 @@ interface ModelResponse {
   model: ModelEntry;
 }
 
+interface SearchResponse {
+  ok: boolean;
+  results: SearchResult[];
+}
+
+function inferQuantization(filename: string): string {
+  const upper = filename.toUpperCase();
+  const markers = ['Q8_0', 'Q6_K', 'Q5_K_M', 'Q5_K_S', 'Q4_K_M', 'Q4_K_S', 'Q3_K_M', 'Q2_K', 'F16'];
+  return markers.find(marker => upper.includes(marker)) || 'Q4_K_M';
+}
+
 export default function AdminModelsTab() {
   const [models, setModels] = useState<ModelEntry[]>([]);
-  const [search, setSearch] = useState('');
+  const [registrySearch, setRegistrySearch] = useState('');
+  const [catalogSearch, setCatalogSearch] = useState('');
+  const [catalogType, setCatalogType] = useState<'all' | 'text' | 'vision' | 'code'>('all');
+  const [catalogResults, setCatalogResults] = useState<SearchResult[]>([]);
+  const [catalogSearched, setCatalogSearched] = useState(false);
+  const [searchingCatalog, setSearchingCatalog] = useState(false);
   const [editingPrompt, setEditingPrompt] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [installing, setInstalling] = useState(false);
   const [installProgress, setInstallProgress] = useState(0);
 
-  const { register, handleSubmit, reset, formState: { errors } } = useForm<InstallForm>();
+  const { register, handleSubmit, reset, setValue, formState: { errors } } = useForm<InstallForm>({
+    defaultValues: {
+      modelType: 'text',
+      quantization: 'Q4_K_M',
+    },
+  });
   const { register: regPrompt, handleSubmit: handlePromptSubmit, setValue: setPromptValue } = useForm<SystemPromptForm>();
 
   const loadModels = () => {
@@ -79,8 +112,9 @@ export default function AdminModelsTab() {
   }, []);
 
   const filtered = models.filter(m =>
-    m.name.toLowerCase().includes(search.toLowerCase()) ||
-    m.repoId.toLowerCase().includes(search.toLowerCase())
+    m.name.toLowerCase().includes(registrySearch.toLowerCase()) ||
+    m.repoId.toLowerCase().includes(registrySearch.toLowerCase()) ||
+    m.filename.toLowerCase().includes(registrySearch.toLowerCase())
   );
 
   const visibleModels = filtered.filter(m => !m.hidden);
@@ -179,6 +213,33 @@ export default function AdminModelsTab() {
     }
   };
 
+  const handleCatalogSearch = async () => {
+    setSearchingCatalog(true);
+    setCatalogSearched(true);
+    try {
+      const params = new URLSearchParams();
+      if (catalogSearch.trim()) params.set('q', catalogSearch.trim());
+      if (catalogType !== 'all') params.set('type', catalogType);
+      params.set('limit', '8');
+
+      const payload = await getJson<SearchResponse>(`/models/search?${params.toString()}`, true);
+      setCatalogResults(payload.results);
+      toast.success(payload.results.length ? `Found ${payload.results.length} model(s)` : 'No GGUF models found');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Search failed');
+    } finally {
+      setSearchingCatalog(false);
+    }
+  };
+
+  const applyCatalogResult = (result: SearchResult, filename: string) => {
+    setValue('repoId', result.repoId);
+    setValue('filename', filename);
+    setValue('modelType', result.type);
+    setValue('quantization', inferQuantization(filename));
+    toast.success(`Install form filled from ${result.repoId}`);
+  };
+
   // Compatibility check
   const visionModels = models.filter(m => m.type === 'vision');
   const selectedModel = models.find(m => m.selected);
@@ -206,6 +267,125 @@ export default function AdminModelsTab() {
               : `Vision model selected as primary — vision models cannot handle text chat. Select a TEXT or CODE model for chat responses.`
             }
           </div>
+        </div>
+      </div>
+
+      {/* HuggingFace search */}
+      <div className="bg-ttd-surface border border-ttd-border rounded-sm overflow-hidden">
+        <div className="px-4 py-3 border-b border-ttd-border flex items-center gap-2">
+          <Search size={13} className="text-ttd-purple" />
+          <span className="text-xs font-bold tracking-wider text-ttd-text">SEARCH HUGGINGFACE GGUF MODELS</span>
+        </div>
+        <div className="p-4 space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_180px_auto] gap-3">
+            <div className="relative">
+              <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-ttd-dim" />
+              <input
+                type="text"
+                value={catalogSearch}
+                onChange={(e) => setCatalogSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void handleCatalogSearch();
+                  }
+                }}
+                placeholder="deepseek, qwen, mistral, flux..."
+                className="ttd-input text-xs py-2 pl-8"
+              />
+            </div>
+            <select
+              value={catalogType}
+              onChange={(e) => setCatalogType(e.target.value as 'all' | 'text' | 'vision' | 'code')}
+              className="ttd-input text-xs"
+            >
+              <option value="all">ALL TYPES</option>
+              <option value="text">TEXT</option>
+              <option value="code">CODE</option>
+              <option value="vision">VISION</option>
+            </select>
+            <button
+              type="button"
+              onClick={() => void handleCatalogSearch()}
+              disabled={searchingCatalog}
+              className="ttd-btn ttd-btn-cyan text-xs px-4 py-2 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Search size={12} />
+              {searchingCatalog ? 'SEARCHING...' : 'SEARCH HF'}
+            </button>
+          </div>
+
+          <div className="text-[11px] text-ttd-dim">
+            Search returns repos that actually contain `.gguf` files. Click a file button and the install form below fills itself.
+          </div>
+
+          {catalogResults.length > 0 && (
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              {catalogResults.map((result) => (
+                <div key={result.repoId} className="border border-ttd-border rounded-sm bg-ttd-elevated/40 p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-ttd-text truncate">{result.name}</div>
+                      <div className="text-[11px] text-ttd-dim truncate">{result.repoId}</div>
+                    </div>
+                    <span className={`text-[10px] border px-1.5 py-0.5 rounded-sm ${TYPE_CONFIG[result.type].cls}`}>
+                      {TYPE_CONFIG[result.type].label}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2 text-[10px]">
+                    <div className="bg-ttd-bg rounded-sm px-2 py-1.5">
+                      <div className="text-ttd-dim mb-0.5">DOWNLOADS</div>
+                      <div className="text-ttd-text font-mono">{result.downloads.toLocaleString()}</div>
+                    </div>
+                    <div className="bg-ttd-bg rounded-sm px-2 py-1.5">
+                      <div className="text-ttd-dim mb-0.5">LIKES</div>
+                      <div className="text-ttd-purple font-mono">{result.likes.toLocaleString()}</div>
+                    </div>
+                    <div className="bg-ttd-bg rounded-sm px-2 py-1.5">
+                      <div className="text-ttd-dim mb-0.5">TASK</div>
+                      <div className="text-ttd-cyan font-mono truncate">{result.pipelineTag || 'gguf'}</div>
+                    </div>
+                  </div>
+
+                  {result.tags.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {result.tags.map((tag) => (
+                        <span key={`${result.repoId}-${tag}`} className="text-[10px] px-1.5 py-0.5 rounded-sm border border-ttd-border text-ttd-dim">
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="space-y-2">
+                    <div className="text-[10px] text-ttd-muted tracking-wider uppercase">
+                      GGUF Files {result.updatedAt ? `· Updated ${result.updatedAt}` : ''}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {result.ggufFiles.map((filename) => (
+                        <button
+                          key={`${result.repoId}-${filename}`}
+                          type="button"
+                          onClick={() => applyCatalogResult(result, filename)}
+                          className="ttd-btn ttd-btn-ghost text-[10px] px-3 py-1.5 max-w-full"
+                          title={filename}
+                        >
+                          <span className="truncate inline-block max-w-[260px] align-bottom">{filename}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {catalogSearched && !searchingCatalog && catalogResults.length === 0 && (
+            <div className="border border-ttd-border rounded-sm px-4 py-6 text-center text-ttd-muted text-sm">
+              No GGUF repositories matched this search.
+            </div>
+          )}
         </div>
       </div>
 
@@ -248,6 +428,7 @@ export default function AdminModelsTab() {
                 className="ttd-input text-xs"
               >
                 <option value="text">TEXT (language model)</option>
+                <option value="code">CODE (coding model)</option>
                 <option value="vision">VISION (image generation)</option>
               </select>
             </div>
@@ -294,16 +475,16 @@ export default function AdminModelsTab() {
           <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-ttd-dim" />
           <input
             type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="search models..."
+            value={registrySearch}
+            onChange={(e) => setRegistrySearch(e.target.value)}
+            placeholder="filter registry..."
             className="ttd-input text-xs py-2 pl-8"
           />
         </div>
         <div className="text-[10px] text-ttd-muted">{models.length} models · {models.filter(m => m.status === 'ready').length} ready</div>
-        <button onClick={() => { setSearch(''); }} className="ttd-btn ttd-btn-ghost text-xs flex items-center gap-1.5 px-3 py-1">
+        <button onClick={() => { setRegistrySearch(''); }} className="ttd-btn ttd-btn-ghost text-xs flex items-center gap-1.5 px-3 py-1">
           <Search size={11} />
-          FIND ALL
+          CLEAR FILTER
         </button>
         <button onClick={handleHideAll} className="ttd-btn ttd-btn-ghost text-xs flex items-center gap-1.5 px-3 py-1">
           <EyeOff size={11} />

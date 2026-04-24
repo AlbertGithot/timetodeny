@@ -11,7 +11,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import psutil
 from django.conf import settings
@@ -456,3 +456,86 @@ def system_info() -> list[dict[str, str]]:
         {"label": "llama.cpp URL", "value": settings.TTD_LLAMA_CPP_URL},
         {"label": "Model dir", "value": str(settings.TTD_MODEL_DIR)},
     ]
+
+
+def infer_hf_model_type(repo_id: str, tags: list[str], pipeline_tag: str | None = None) -> str:
+    haystack = " ".join([repo_id, *tags, pipeline_tag or ""]).lower()
+    code_markers = ("coder", "code", "programming", "fill-mask-code")
+    vision_markers = ("vision", "image", "diffusion", "stable-diffusion", "sdxl", "flux", "clip", "siglip")
+
+    if any(marker in haystack for marker in code_markers):
+        return "code"
+    if any(marker in haystack for marker in vision_markers):
+        return "vision"
+    return "text"
+
+
+def search_huggingface_models(query: str, model_type: str = "", limit: int = 8) -> list[dict[str, Any]]:
+    try:
+        from huggingface_hub import HfApi
+    except ImportError as exc:
+        raise RuntimeError("huggingface_hub is not installed on the backend") from exc
+
+    api = HfApi()
+    normalized_query = (query or "").strip()
+    normalized_type = model_type if model_type in {"text", "vision", "code"} else ""
+    fetch_limit = max(limit * 5, 24)
+    seen: set[str] = set()
+    results: list[dict[str, Any]] = []
+    search_term = f"{normalized_query} GGUF".strip() if normalized_query else "gguf"
+
+    try:
+        iterator = api.list_models(search=search_term, limit=fetch_limit)
+        for item in iterator:
+            repo_id = getattr(item, "id", None) or getattr(item, "modelId", None)
+            if not repo_id or repo_id in seen:
+                continue
+            seen.add(repo_id)
+
+            try:
+                details = api.model_info(repo_id)
+            except Exception:
+                continue
+
+            siblings = getattr(details, "siblings", None) or []
+            gguf_files = sorted(
+                {
+                    getattr(file, "rfilename", "")
+                    for file in siblings
+                    if getattr(file, "rfilename", "").lower().endswith(".gguf")
+                }
+            )
+            if not gguf_files:
+                continue
+
+            tags = list(getattr(details, "tags", None) or getattr(item, "tags", None) or [])
+            pipeline_tag = getattr(details, "pipeline_tag", None) or getattr(item, "pipeline_tag", None)
+            inferred_type = infer_hf_model_type(repo_id, tags, pipeline_tag)
+            if normalized_type and inferred_type != normalized_type:
+                continue
+
+            last_modified = getattr(details, "last_modified", None)
+            updated_at = ""
+            if last_modified:
+                updated_at = last_modified.isoformat(sep=" ", timespec="seconds") if hasattr(last_modified, "isoformat") else str(last_modified)
+
+            results.append(
+                {
+                    "repoId": repo_id,
+                    "name": repo_id.split("/")[-1],
+                    "type": inferred_type,
+                    "downloads": int(getattr(details, "downloads", 0) or 0),
+                    "likes": int(getattr(details, "likes", 0) or 0),
+                    "pipelineTag": pipeline_tag or "",
+                    "updatedAt": updated_at,
+                    "tags": tags[:6],
+                    "ggufFiles": gguf_files[:8],
+                }
+            )
+
+            if len(results) >= limit:
+                break
+    except Exception as exc:
+        raise RuntimeError(f"HuggingFace search failed: {exc}") from exc
+
+    return results

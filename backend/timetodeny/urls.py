@@ -12,6 +12,7 @@ urlpatterns = [
     path("api/chats/<uuid:chat_id>", views.chat_detail),
     path("api/chat/stream", views.chat_stream),
     path("api/models", views.models_collection),
+    path("api/models/search", views.models_search),
     path("api/models/install", views.model_install),
     path("api/models/show-all", views.models_show_all),
     path("api/models/hide-all", views.models_hide_all),

@@ -10,6 +10,7 @@ Next.js chat UI with a Django/Python backend for local AI workflows.
 - Generated file cards with content preview and a backend smoke test.
 - Image generation placeholder output saved under Django media.
 - Admin login, request database, server load view, model registry actions, password change, and session log.
+- HuggingFace GGUF model search in the admin registry with one-click install form fill.
 - SQLite for local development, MySQL via environment variables.
 - llama.cpp integration through `llama-server` and GGUF models.
 
@@ -33,6 +34,7 @@ This is the Linux branch. It contains the shared Django/Next.js code and the Lin
 By default the launcher starts `llama-server` together with Django and Next.js. Put a GGUF model into `backend/models` or set `LLAMA_CPP_MODEL_PATH`.
 Before startup it also tries to fast-forward the current git branch from `origin` automatically. If the repo has local changes, auto-update is skipped.
 If `node`/`npm` is missing on Linux, `./linux.sh` downloads a local runtime into `.runtime/node` automatically.
+The launcher also auto-discovers `manage.py`, `requirements.txt`, the frontend folder, `llama-server`, and nearby `.gguf` models in common project/system locations.
 
 ```bash
 ./linux.sh

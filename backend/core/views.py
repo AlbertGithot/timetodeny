@@ -26,6 +26,7 @@ from .serializers import (
 from .services import (
     build_local_draft,
     chunk_text,
+    search_huggingface_models,
     stream_llamacpp,
     system_snapshot,
     wants_file,
@@ -267,6 +268,28 @@ def models_collection(request: HttpRequest):
         models = [model_to_dict(model) for model in ModelRegistry.objects.all()]
         return json_response({"ok": True, "models": models})
     return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+
+
+def models_search(request: HttpRequest):
+    session, error = require_admin(request)
+    if error:
+        return error
+
+    query = (request.GET.get("q") or "").strip()
+    model_type = (request.GET.get("type") or "").strip().lower()
+    try:
+        limit = int(request.GET.get("limit") or "8")
+    except ValueError:
+        limit = 8
+    limit = max(1, min(limit, 24))
+
+    try:
+        results = search_huggingface_models(query, model_type, limit)
+    except RuntimeError as exc:
+        return json_response({"ok": False, "error": str(exc)}, status=502)
+
+    log_admin_action(request, f"Searched HuggingFace models: {query or 'gguf'}", session)
+    return json_response({"ok": True, "results": results})
 
 
 @csrf_exempt

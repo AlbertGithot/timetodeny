@@ -5,9 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 SCRIPT_PATH="${ROOT_DIR}/$(basename "${BASH_SOURCE[0]}")"
-BACKEND_DIR="${ROOT_DIR}/backend"
-FRONTEND_DIR="${ROOT_DIR}/frontend"
-MANAGE_PY="${ROOT_DIR}/manage.py"
+BACKEND_DIR=""
+FRONTEND_DIR=""
+MANAGE_PY=""
+REQUIREMENTS_FILE=""
 RUNTIME_DIR="${ROOT_DIR}/.runtime"
 NODE_RUNTIME_DIR="${RUNTIME_DIR}/node"
 NODE_DIST_DIR="${RUNTIME_DIR}/node-dist"
@@ -20,7 +21,6 @@ LLAMA_CPP_PORT="${LLAMA_CPP_PORT:-8080}"
 NODE_VERSION="${NODE_VERSION:-24.15.0}"
 
 export TTD_MODEL_BACKEND="${TTD_MODEL_BACKEND:-llamacpp}"
-export TTD_MODEL_DIR="${TTD_MODEL_DIR:-${ROOT_DIR}/backend/models}"
 export NEXT_PUBLIC_API_BASE="${NEXT_PUBLIC_API_BASE:-http://${BACKEND_HOST}:${BACKEND_PORT}/api}"
 export TTD_FRONTEND_ORIGIN="${TTD_FRONTEND_ORIGIN:-http://127.0.0.1:${FRONTEND_PORT}}"
 export TTD_LLAMA_CPP_URL="${TTD_LLAMA_CPP_URL:-http://${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}}"
@@ -76,6 +76,236 @@ auto_update_repo() {
     echo "Repository updated from ${upstream_ref}. Restarting launcher..."
     exec "$SCRIPT_PATH" "$@"
   fi
+}
+
+first_existing_path() {
+  local candidate
+  for candidate in "$@"; do
+    if [ -n "$candidate" ] && [ -e "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+first_existing_dir() {
+  local candidate
+  for candidate in "$@"; do
+    if [ -n "$candidate" ] && [ -d "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+first_executable_path() {
+  local candidate
+  for candidate in "$@"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_repo_file() {
+  local name="$1"
+  find "$ROOT_DIR" \
+    \( -path "*/.git" -o -path "*/node_modules" -o -path "*/.venv" -o -path "*/.next" -o -path "*/.runtime" \) -prune \
+    -o -type f -name "$name" -print -quit 2>/dev/null
+}
+
+find_file_under() {
+  local base_dir="$1"
+  local pattern="$2"
+  local depth="${3:-5}"
+  [ -d "$base_dir" ] || return 0
+  find "$base_dir" -maxdepth "$depth" -type f -name "$pattern" -print -quit 2>/dev/null
+}
+
+find_executable_under() {
+  local base_dir="$1"
+  local name="$2"
+  local depth="${3:-5}"
+  [ -d "$base_dir" ] || return 0
+  find "$base_dir" -maxdepth "$depth" -type f -name "$name" -perm -u+x -print -quit 2>/dev/null
+}
+
+resolve_repo_layout() {
+  local frontend_package settings_file model_dir_override
+  MANAGE_PY="$(
+    first_existing_path \
+      "${ROOT_DIR}/manage.py" \
+      "${ROOT_DIR}/backend/manage.py" \
+      "$(find_repo_file "manage.py")" \
+      || true
+  )"
+  if [ -z "$MANAGE_PY" ]; then
+    echo "manage.py not found under ${ROOT_DIR}"
+    exit 1
+  fi
+
+  REQUIREMENTS_FILE="$(
+    first_existing_path \
+      "${ROOT_DIR}/requirements.txt" \
+      "${ROOT_DIR}/backend/requirements.txt" \
+      "$(find_repo_file "requirements.txt")" \
+      || true
+  )"
+  if [ -z "$REQUIREMENTS_FILE" ]; then
+    echo "requirements.txt not found under ${ROOT_DIR}"
+    exit 1
+  fi
+
+  frontend_package="$(
+    first_existing_path \
+      "${ROOT_DIR}/frontend/package.json" \
+      "${ROOT_DIR}/package.json" \
+      "$(find_repo_file "package.json")" \
+      || true
+  )"
+  if [ -z "$frontend_package" ]; then
+    echo "frontend package.json not found under ${ROOT_DIR}"
+    exit 1
+  fi
+  FRONTEND_DIR="$(cd "$(dirname "$frontend_package")" && pwd)"
+
+  settings_file="$(
+    first_existing_path \
+      "${ROOT_DIR}/backend/timetodeny/settings.py" \
+      "${ROOT_DIR}/timetodeny/settings.py" \
+      "$(find_repo_file "settings.py")" \
+      || true
+  )"
+  if [ -z "$settings_file" ]; then
+    echo "Django settings.py not found under ${ROOT_DIR}"
+    exit 1
+  fi
+  BACKEND_DIR="$(cd "$(dirname "$settings_file")/.." && pwd)"
+
+  model_dir_override="${TTD_MODEL_DIR:-}"
+  if [ -n "$model_dir_override" ]; then
+    export TTD_MODEL_DIR="$model_dir_override"
+  else
+    export TTD_MODEL_DIR="$(
+      first_existing_dir \
+        "${ROOT_DIR}/backend/models" \
+        "${ROOT_DIR}/models" \
+        "${BACKEND_DIR}/models" \
+        || true
+    )"
+    if [ -z "${TTD_MODEL_DIR:-}" ]; then
+      export TTD_MODEL_DIR="${BACKEND_DIR}/models"
+    fi
+  fi
+}
+
+resolve_llama_cpp_bin() {
+  local candidate=""
+
+  if [ -n "${LLAMA_CPP_BIN:-}" ]; then
+    if [ -x "$LLAMA_CPP_BIN" ]; then
+      return 0
+    fi
+    if command -v "$LLAMA_CPP_BIN" >/dev/null 2>&1; then
+      LLAMA_CPP_BIN="$(command -v "$LLAMA_CPP_BIN")"
+      return 0
+    fi
+  fi
+
+  candidate="$(command -v llama-server 2>/dev/null || true)"
+  if [ -z "$candidate" ]; then
+    candidate="$(
+      first_executable_path \
+        "${ROOT_DIR}/llama-server" \
+        "${ROOT_DIR}/bin/llama-server" \
+        "${ROOT_DIR}/build/bin/llama-server" \
+        "${ROOT_DIR}/llama.cpp/llama-server" \
+        "${ROOT_DIR}/llama.cpp/bin/llama-server" \
+        "${ROOT_DIR}/llama.cpp/build/bin/llama-server" \
+        "${ROOT_DIR}/backend/llama.cpp/build/bin/llama-server" \
+        "${HOME}/.local/bin/llama-server" \
+        "${HOME}/llama.cpp/llama-server" \
+        "${HOME}/llama.cpp/bin/llama-server" \
+        "${HOME}/llama.cpp/build/bin/llama-server" \
+        "/usr/local/bin/llama-server" \
+        "/usr/bin/llama-server" \
+        "/opt/llama.cpp/bin/llama-server" \
+        "/opt/llama.cpp/build/bin/llama-server" \
+        || true
+    )"
+  fi
+  if [ -z "$candidate" ]; then
+    candidate="$(find_executable_under "$ROOT_DIR" "llama-server" 6 || true)"
+  fi
+  if [ -z "$candidate" ]; then
+    candidate="$(find_executable_under "${HOME}/llama.cpp" "llama-server" 6 || true)"
+  fi
+  if [ -z "$candidate" ]; then
+    candidate="$(find_executable_under "${HOME}/.local" "llama-server" 5 || true)"
+  fi
+  if [ -z "$candidate" ]; then
+    candidate="$(find_executable_under "/usr/local" "llama-server" 5 || true)"
+  fi
+  if [ -z "$candidate" ]; then
+    candidate="$(find_executable_under "/opt" "llama-server" 5 || true)"
+  fi
+
+  if [ -n "$candidate" ]; then
+    LLAMA_CPP_BIN="$candidate"
+    export LLAMA_CPP_BIN
+    echo "Discovered llama-server: ${LLAMA_CPP_BIN}"
+    return 0
+  fi
+
+  return 1
+}
+
+resolve_llama_model_path() {
+  local candidate=""
+  local bin_parent=""
+
+  if [ -n "${LLAMA_CPP_MODEL_PATH:-}" ] && [ -f "$LLAMA_CPP_MODEL_PATH" ]; then
+    return 0
+  fi
+
+  candidate="$(find_file_under "$TTD_MODEL_DIR" "*.gguf" 5 || true)"
+  if [ -z "$candidate" ]; then
+    candidate="$(find_file_under "${ROOT_DIR}/models" "*.gguf" 5 || true)"
+  fi
+  if [ -z "$candidate" ]; then
+    candidate="$(find_file_under "${BACKEND_DIR}/models" "*.gguf" 5 || true)"
+  fi
+  if [ -z "$candidate" ]; then
+    candidate="$(find_file_under "$(cd "${ROOT_DIR}/.." && pwd)" "*.gguf" 4 || true)"
+  fi
+  if [ -z "$candidate" ]; then
+    candidate="$(find_file_under "${HOME}/models" "*.gguf" 5 || true)"
+  fi
+  if [ -z "$candidate" ]; then
+    candidate="$(find_file_under "${HOME}/project" "*.gguf" 6 || true)"
+  fi
+  if [ -z "$candidate" ]; then
+    candidate="$(find_file_under "${HOME}/llama.cpp/models" "*.gguf" 6 || true)"
+  fi
+
+  if [ -n "${LLAMA_CPP_BIN:-}" ]; then
+    bin_parent="$(cd "$(dirname "$LLAMA_CPP_BIN")/.." && pwd 2>/dev/null || true)"
+    if [ -z "$candidate" ] && [ -n "$bin_parent" ]; then
+      candidate="$(find_file_under "${bin_parent}/models" "*.gguf" 5 || true)"
+    fi
+  fi
+
+  if [ -n "$candidate" ]; then
+    export LLAMA_CPP_MODEL_PATH="$candidate"
+    echo "Discovered GGUF model: ${LLAMA_CPP_MODEL_PATH}"
+    return 0
+  fi
+
+  return 1
 }
 
 add_local_node_to_path() {
@@ -159,6 +389,7 @@ ensure_node_runtime() {
 
 add_local_node_to_path
 auto_update_repo "$@"
+resolve_repo_layout
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "python3 is required"
@@ -175,7 +406,7 @@ fi
 
 PYTHON=".venv/bin/python"
 "$PYTHON" -m pip install --upgrade pip
-"$PYTHON" -m pip install -r requirements.txt
+"$PYTHON" -m pip install -r "$REQUIREMENTS_FILE"
 
 mkdir -p "$TTD_MODEL_DIR"
 
@@ -199,21 +430,15 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if [ "$TTD_MODEL_BACKEND" = "llamacpp" ] && [ -z "${LLAMA_CPP_MODEL_PATH:-}" ]; then
-  FOUND_MODEL="$(find "$TTD_MODEL_DIR" -type f -name "*.gguf" -print -quit 2>/dev/null || true)"
-  if [ -n "$FOUND_MODEL" ]; then
-    export LLAMA_CPP_MODEL_PATH="$FOUND_MODEL"
-  fi
-fi
-
 if [ "$TTD_MODEL_BACKEND" = "llamacpp" ]; then
-  LLAMA_CPP_BIN="${LLAMA_CPP_BIN:-llama-server}"
-  if ! command -v "$LLAMA_CPP_BIN" >/dev/null 2>&1; then
-    echo "$LLAMA_CPP_BIN is required. Install/build llama.cpp and make llama-server available in PATH."
+  LLAMA_CPP_BIN="${LLAMA_CPP_BIN:-}"
+  if ! resolve_llama_cpp_bin; then
+    echo "llama-server not found. Searched PATH, repo directories, \$HOME/llama.cpp, \$HOME/.local/bin, /usr/local, and /opt."
     exit 1
   fi
-  if [ -z "${LLAMA_CPP_MODEL_PATH:-}" ]; then
+  if ! resolve_llama_model_path; then
     echo "No GGUF model found."
+    echo "Searched model directories around the repo, ${TTD_MODEL_DIR}, \$HOME/models, \$HOME/project, and llama.cpp model folders."
     echo "Put a .gguf file into: $TTD_MODEL_DIR"
     echo "Or set LLAMA_CPP_MODEL_PATH=/full/path/model.gguf"
     echo "For UI-only dev without llama.cpp: TTD_MODEL_BACKEND=mock ./linux.sh"
