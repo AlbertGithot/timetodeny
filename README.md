@@ -35,6 +35,7 @@ By default the launcher starts `llama-server` together with Django and Next.js. 
 Before startup it also tries to fast-forward the current git branch from `origin` automatically. If the repo has local changes, auto-update is skipped.
 If `node`/`npm` is missing on Linux, `./linux.sh` downloads a local runtime into `.runtime/node` automatically.
 The launcher also auto-discovers `manage.py`, `requirements.txt`, the frontend folder, `llama-server`, and nearby `.gguf` models in common project/system locations.
+If `llama-server` is missing, the launcher can clone and build `ggml-org/llama.cpp` automatically into `.runtime/llama.cpp` when git/build tools are available.
 
 ```bash
 ./linux.sh
@@ -44,6 +45,12 @@ Disable auto-update if needed:
 
 ```bash
 TTD_AUTO_UPDATE=0 ./linux.sh
+```
+
+Disable automatic llama.cpp bootstrap if needed:
+
+```bash
+TTD_AUTO_BOOTSTRAP_LLAMA_CPP=0 ./linux.sh
 ```
 
 The launcher starts:

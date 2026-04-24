@@ -12,6 +12,7 @@ REQUIREMENTS_FILE=""
 RUNTIME_DIR="${ROOT_DIR}/.runtime"
 NODE_RUNTIME_DIR="${RUNTIME_DIR}/node"
 NODE_DIST_DIR="${RUNTIME_DIR}/node-dist"
+LLAMA_CPP_RUNTIME_DIR="${RUNTIME_DIR}/llama.cpp"
 
 BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
@@ -25,6 +26,9 @@ export NEXT_PUBLIC_API_BASE="${NEXT_PUBLIC_API_BASE:-http://${BACKEND_HOST}:${BA
 export TTD_FRONTEND_ORIGIN="${TTD_FRONTEND_ORIGIN:-http://127.0.0.1:${FRONTEND_PORT}}"
 export TTD_LLAMA_CPP_URL="${TTD_LLAMA_CPP_URL:-http://${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}}"
 export TTD_AUTO_UPDATE="${TTD_AUTO_UPDATE:-1}"
+export TTD_AUTO_BOOTSTRAP_LLAMA_CPP="${TTD_AUTO_BOOTSTRAP_LLAMA_CPP:-1}"
+export LLAMA_CPP_REPO_URL="${LLAMA_CPP_REPO_URL:-https://github.com/ggml-org/llama.cpp.git}"
+export LLAMA_CPP_REPO_REF="${LLAMA_CPP_REPO_REF:-master}"
 
 auto_update_repo() {
   local current_branch before_head after_head upstream_ref
@@ -134,6 +138,18 @@ find_executable_under() {
   find "$base_dir" -maxdepth "$depth" -type f -name "$name" -perm -u+x -print -quit 2>/dev/null
 }
 
+cpu_jobs() {
+  if command -v nproc >/dev/null 2>&1; then
+    nproc
+    return 0
+  fi
+  if command -v getconf >/dev/null 2>&1; then
+    getconf _NPROCESSORS_ONLN
+    return 0
+  fi
+  echo 2
+}
+
 resolve_repo_layout() {
   local frontend_package settings_file model_dir_override
   MANAGE_PY="$(
@@ -220,6 +236,9 @@ resolve_llama_cpp_bin() {
   if [ -z "$candidate" ]; then
     candidate="$(
       first_executable_path \
+        "${LLAMA_CPP_RUNTIME_DIR}/build/bin/llama-server" \
+        "${LLAMA_CPP_RUNTIME_DIR}/llama-server" \
+        "${LLAMA_CPP_RUNTIME_DIR}/bin/llama-server" \
         "${ROOT_DIR}/llama-server" \
         "${ROOT_DIR}/bin/llama-server" \
         "${ROOT_DIR}/build/bin/llama-server" \
@@ -237,6 +256,9 @@ resolve_llama_cpp_bin() {
         "/opt/llama.cpp/build/bin/llama-server" \
         || true
     )"
+  fi
+  if [ -z "$candidate" ]; then
+    candidate="$(find_executable_under "$LLAMA_CPP_RUNTIME_DIR" "llama-server" 6 || true)"
   fi
   if [ -z "$candidate" ]; then
     candidate="$(find_executable_under "$ROOT_DIR" "llama-server" 6 || true)"
@@ -261,6 +283,83 @@ resolve_llama_cpp_bin() {
     return 0
   fi
 
+  return 1
+}
+
+bootstrap_llama_cpp() {
+  local repo_dir build_dir jobs candidate=""
+
+  if [ "$TTD_AUTO_BOOTSTRAP_LLAMA_CPP" != "1" ]; then
+    return 1
+  fi
+
+  if ! command -v git >/dev/null 2>&1; then
+    echo "Cannot bootstrap llama.cpp automatically: git is not installed"
+    return 1
+  fi
+
+  if ! command -v cmake >/dev/null 2>&1 && ! command -v make >/dev/null 2>&1; then
+    echo "Cannot bootstrap llama.cpp automatically: install cmake or make first"
+    return 1
+  fi
+
+  if ! command -v c++ >/dev/null 2>&1 && ! command -v g++ >/dev/null 2>&1 && ! command -v clang++ >/dev/null 2>&1; then
+    echo "Cannot bootstrap llama.cpp automatically: no C++ compiler found"
+    return 1
+  fi
+
+  repo_dir="${LLAMA_CPP_SOURCE_DIR:-$LLAMA_CPP_RUNTIME_DIR}"
+  build_dir="${repo_dir}/build"
+  jobs="${LLAMA_CPP_BUILD_JOBS:-$(cpu_jobs)}"
+
+  mkdir -p "$RUNTIME_DIR"
+
+  if [ ! -d "${repo_dir}/.git" ]; then
+    echo "Bootstrapping llama.cpp from ${LLAMA_CPP_REPO_URL}..."
+    rm -rf "$repo_dir"
+    git clone --depth 1 --branch "$LLAMA_CPP_REPO_REF" --recurse-submodules "$LLAMA_CPP_REPO_URL" "$repo_dir"
+  else
+    echo "Updating local llama.cpp runtime..."
+    if [ -z "$(git -C "$repo_dir" status --porcelain 2>/dev/null || true)" ]; then
+      git -C "$repo_dir" fetch --quiet origin "$LLAMA_CPP_REPO_REF" || true
+      git -C "$repo_dir" checkout --quiet "$LLAMA_CPP_REPO_REF" || true
+      git -C "$repo_dir" pull --ff-only --quiet origin "$LLAMA_CPP_REPO_REF" || true
+      git -C "$repo_dir" submodule update --init --recursive >/dev/null 2>&1 || true
+    else
+      echo "Skipping llama.cpp source update: local runtime tree has changes"
+    fi
+  fi
+
+  if command -v cmake >/dev/null 2>&1; then
+    echo "Building llama-server with CMake..."
+    cmake -S "$repo_dir" -B "$build_dir" -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_SERVER=ON >/dev/null
+    cmake --build "$build_dir" --config Release --target llama-server -j "$jobs"
+    candidate="$(
+      first_executable_path \
+        "${build_dir}/bin/llama-server" \
+        "${build_dir}/llama-server" \
+        || true
+    )"
+  else
+    echo "Building llama-server with make..."
+    make -C "$repo_dir" -j"$jobs" llama-server
+    candidate="$(
+      first_executable_path \
+        "${repo_dir}/llama-server" \
+        "${repo_dir}/bin/llama-server" \
+        "${repo_dir}/build/bin/llama-server" \
+        || true
+    )"
+  fi
+
+  if [ -n "$candidate" ]; then
+    LLAMA_CPP_BIN="$candidate"
+    export LLAMA_CPP_BIN
+    echo "Built llama-server: ${LLAMA_CPP_BIN}"
+    return 0
+  fi
+
+  echo "llama.cpp bootstrap finished, but llama-server binary was not found"
   return 1
 }
 
@@ -290,6 +389,9 @@ resolve_llama_model_path() {
   fi
   if [ -z "$candidate" ]; then
     candidate="$(find_file_under "${HOME}/llama.cpp/models" "*.gguf" 6 || true)"
+  fi
+  if [ -z "$candidate" ]; then
+    candidate="$(find_file_under "${LLAMA_CPP_RUNTIME_DIR}/models" "*.gguf" 6 || true)"
   fi
 
   if [ -n "${LLAMA_CPP_BIN:-}" ]; then
@@ -432,8 +534,9 @@ trap cleanup EXIT INT TERM
 
 if [ "$TTD_MODEL_BACKEND" = "llamacpp" ]; then
   LLAMA_CPP_BIN="${LLAMA_CPP_BIN:-}"
-  if ! resolve_llama_cpp_bin; then
+  if ! resolve_llama_cpp_bin && ! bootstrap_llama_cpp && ! resolve_llama_cpp_bin; then
     echo "llama-server not found. Searched PATH, repo directories, \$HOME/llama.cpp, \$HOME/.local/bin, /usr/local, and /opt."
+    echo "Auto-bootstrap also failed. Install build tools (git, cmake or make, and a C++ compiler) or set LLAMA_CPP_BIN manually."
     exit 1
   fi
   if ! resolve_llama_model_path; then
