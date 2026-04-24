@@ -671,6 +671,26 @@ resolve_llama_model_path() {
     return 0
   fi
 
+  if [ -n "${PYTHON:-}" ] && [ -n "${MANAGE_PY:-}" ]; then
+    candidate="$(
+      "$PYTHON" "$MANAGE_PY" shell -c "
+from pathlib import Path
+from core.models import ModelRegistry
+query = ModelRegistry.objects.filter(status='ready').exclude(local_path='')
+model = query.filter(selected=True).first() or query.first()
+if model:
+    path = Path(model.local_path).expanduser()
+    if path.is_file():
+        print('TTD_MODEL_PATH::' + str(path.resolve()))
+" 2>/dev/null | sed -n 's/^TTD_MODEL_PATH:://p' | tail -n 1
+    )"
+  fi
+  if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+    export LLAMA_CPP_MODEL_PATH="$candidate"
+    echo "Using selected registry GGUF model: ${LLAMA_CPP_MODEL_PATH}"
+    return 0
+  fi
+
   candidate="$(find_file_under "$TTD_MODEL_DIR" "*.gguf" 5 || true)"
   if [ -z "$candidate" ]; then
     candidate="$(find_file_under "${ROOT_DIR}/models" "*.gguf" 5 || true)"

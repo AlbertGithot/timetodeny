@@ -15,6 +15,7 @@ from django.http import FileResponse, HttpRequest, HttpResponse, StreamingHttpRe
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
+from .llama_runtime import ensure_llama_server, stop_managed_llama
 from .models import AdminSession, AdminSetting, Attachment, Chat, GeneratedFile, Message, ModelRegistry, RequestLog
 from .seed import ensure_defaults
 from .serializers import (
@@ -283,6 +284,7 @@ def chat_stream(request: HttpRequest):
 
             use_llamacpp = settings.TTD_MODEL_BACKEND in {"llamacpp", "llama.cpp"} and not wants_file(prompt) and not wants_image(prompt)
             if use_llamacpp:
+                ensure_llama_server(selected)
                 for token in stream_llamacpp(prompt, mode, model_name, system_prompt):
                     content += token
                     token_count += max(1, len(token.split()))
@@ -521,6 +523,7 @@ def model_action(request: HttpRequest, model_id: UUID, action: str):
     if action == "select":
         ModelRegistry.objects.exclude(id=model.id).update(selected=False)
         model.selected = True
+        stop_managed_llama()
     elif action == "deselect":
         model.selected = False
     elif action == "hide":

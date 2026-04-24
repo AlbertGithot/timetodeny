@@ -103,6 +103,7 @@ The launcher starts:
 - llama.cpp source/build: `llamaserver/llama.cpp`
 
 Model installs from the admin panel download the requested HuggingFace `.gguf` file into `models/` by default. Set `TTD_ALLOW_HF_DOWNLOAD=0` only if you intentionally want to block web downloads.
+When a ready model is selected, the launcher prefers that registered local file. If the Django chat sees that `llama-server` is not listening, it also tries to start the managed `llama-server` process automatically before sending the prompt.
 
 ## Manual Backend
 

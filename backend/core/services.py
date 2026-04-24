@@ -367,7 +367,9 @@ def stream_llamacpp(prompt: str, mode: str, model_name: str, system_prompt: str 
                 if item.get("stop") or item.get("done"):
                     break
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        yield f"\n\n[llama.cpp backend unavailable: {exc}. Start llama-server or switch TTD_MODEL_BACKEND=mock for UI-only dev.]"
+        raise RuntimeError(
+            f"llama.cpp backend unavailable: {exc}. Start llama-server or switch TTD_MODEL_BACKEND=mock for UI-only dev."
+        ) from exc
 
 
 def system_snapshot(interval: str) -> dict:
