@@ -393,6 +393,61 @@ def models_search(request: HttpRequest):
     return json_response({"ok": True, "results": results})
 
 
+def bool_from_payload(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def validate_gguf_filename(filename: str) -> None:
+    relative = PurePosixPath(filename)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("filename must be a safe relative HuggingFace file path")
+    if not filename.lower().endswith(".gguf"):
+        raise ValueError("filename must end in .gguf")
+
+
+def download_huggingface_model(repo_id: str, filename: str) -> tuple[str, str]:
+    validate_gguf_filename(filename)
+    settings.TTD_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as exc:
+        raise RuntimeError("huggingface_hub is not installed on the backend") from exc
+
+    local_path = Path(hf_hub_download(repo_id=repo_id, filename=filename, local_dir=str(settings.TTD_MODEL_DIR))).resolve()
+    if not local_path.is_file():
+        raise RuntimeError(f"HuggingFace download finished but file was not found: {local_path}")
+    return str(local_path), file_size_label(str(local_path))
+
+
+def delete_local_model_file(local_path: str) -> None:
+    if not local_path:
+        return
+
+    try:
+        model_root = settings.TTD_MODEL_DIR.resolve()
+        candidate = Path(local_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = model_root / candidate
+        candidate = candidate.resolve()
+    except OSError:
+        return
+
+    if candidate != model_root and model_root not in candidate.parents:
+        return
+    if candidate.is_file():
+        try:
+            candidate.unlink()
+        except OSError:
+            return
+
+
 @csrf_exempt
 def model_install(request: HttpRequest):
     session, error = require_admin(request)
@@ -406,33 +461,51 @@ def model_install(request: HttpRequest):
     if not repo_id or not filename:
         return json_response({"ok": False, "error": "repoId and filename are required"}, status=400)
 
-    local_path = ""
-    status = "ready"
-    size = "-"
-    if data.get("download") or str(getattr(settings, "TTD_ALLOW_HF_DOWNLOAD", "0")) == "1":
-        try:
-            from huggingface_hub import hf_hub_download
+    try:
+        validate_gguf_filename(filename)
+    except ValueError as exc:
+        return json_response({"ok": False, "error": str(exc)}, status=400)
 
-            local_path = hf_hub_download(repo_id=repo_id, filename=filename, local_dir=settings.TTD_MODEL_DIR)
-            size = file_size_label(local_path)
-        except Exception as exc:
-            status = "error"
-            local_path = str(exc)
+    model_name = PurePosixPath(filename).name.removesuffix(".gguf")
+    download_requested = bool_from_payload(data.get("download"), default=True)
+    if download_requested and str(getattr(settings, "TTD_ALLOW_HF_DOWNLOAD", "1")) != "1":
+        return json_response({"ok": False, "error": "HuggingFace downloads are disabled by TTD_ALLOW_HF_DOWNLOAD"}, status=403)
 
-    model = ModelRegistry.objects.create(
-        name=filename.replace(".gguf", ""),
+    model, created = ModelRegistry.objects.update_or_create(
         repo_id=repo_id,
         filename=filename,
-        model_type=model_type,
-        quantization=quantization,
-        status=status,
-        size=size,
-        vram="-",
-        download_progress=100 if status == "ready" else 0,
-        local_path=local_path,
+        defaults={
+            "name": model_name,
+            "model_type": model_type,
+            "quantization": quantization,
+            "status": "downloading" if download_requested else "unloaded",
+            "size": "-",
+            "vram": "-",
+            "download_progress": 0,
+            "local_path": "",
+        },
     )
-    log_admin_action(request, f"Installed model registry entry: {model.name}", session)
-    return json_response({"ok": True, "model": model_to_dict(model)}, status=201)
+    if not download_requested:
+        log_admin_action(request, f"Registered model without download: {model.name}", session)
+        return json_response({"ok": True, "model": model_to_dict(model)}, status=201 if created else 200)
+
+    try:
+        local_path, size = download_huggingface_model(repo_id, filename)
+    except Exception as exc:
+        model.status = "error"
+        model.local_path = str(exc)
+        model.download_progress = 0
+        model.save(update_fields=["status", "local_path", "download_progress", "updated_at"])
+        log_admin_action(request, f"Model install failed: {model.name}: {exc}", session)
+        return json_response({"ok": False, "error": f"Model download failed: {exc}", "model": model_to_dict(model)}, status=502)
+
+    model.status = "ready"
+    model.size = size
+    model.local_path = local_path
+    model.download_progress = 100
+    model.save(update_fields=["status", "size", "local_path", "download_progress", "updated_at"])
+    log_admin_action(request, f"Downloaded model: {model.name}", session)
+    return json_response({"ok": True, "model": model_to_dict(model)}, status=201 if created else 200)
 
 
 @csrf_exempt
@@ -456,13 +529,31 @@ def model_action(request: HttpRequest, model_id: UUID, action: str):
         model.hidden = False
     elif action == "delete":
         name = model.name
+        delete_local_model_file(model.local_path)
         model.delete()
         log_admin_action(request, f"Deleted model: {name}", session)
         return json_response({"ok": True})
     elif action == "prompt":
         model.system_prompt = data.get("prompt") or ""
     elif action == "reload":
+        if not model.repo_id or not model.filename:
+            return json_response({"ok": False, "error": "Model has no HuggingFace repo/filename to reload"}, status=400)
+        model.status = "downloading"
+        model.download_progress = 0
+        model.save(update_fields=["status", "download_progress", "updated_at"])
+        try:
+            local_path, size = download_huggingface_model(model.repo_id, model.filename)
+        except Exception as exc:
+            model.status = "error"
+            model.local_path = str(exc)
+            model.download_progress = 0
+            model.save(update_fields=["status", "local_path", "download_progress", "updated_at"])
+            log_admin_action(request, f"Model reload failed: {model.name}: {exc}", session)
+            return json_response({"ok": False, "error": f"Model download failed: {exc}", "model": model_to_dict(model)}, status=502)
         model.status = "ready"
+        model.size = size
+        model.local_path = local_path
+        model.download_progress = 100
     else:
         return json_response({"ok": False, "error": "Unknown model action"}, status=400)
 

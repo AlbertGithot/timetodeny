@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from django.test import Client, TestCase, override_settings
 
-from .models import GeneratedFile, RequestLog
+from .models import GeneratedFile, ModelRegistry, RequestLog
 from .seed import ensure_defaults
 from .services import stream_llamacpp
 
@@ -73,6 +73,74 @@ class ApiSmokeTests(TestCase):
         allowed = self.client.get("/api/admin/requests", HTTP_AUTHORIZATION=f"Bearer {token}")
         self.assertEqual(allowed.status_code, 200)
         self.assertTrue(allowed.json()["ok"])
+
+    def test_model_install_downloads_huggingface_file_by_default(self) -> None:
+        model_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(model_dir.cleanup)
+
+        def fake_download(repo_id: str, filename: str, local_dir: str) -> str:
+            target = Path(local_dir) / filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"gguf")
+            return str(target)
+
+        login = self.client.post(
+            "/api/admin/login",
+            data=json.dumps({"password": "1111"}),
+            content_type="application/json",
+        )
+        token = login.json()["token"]
+
+        with override_settings(TTD_MODEL_DIR=Path(model_dir.name), TTD_ALLOW_HF_DOWNLOAD="1"):
+            with patch("huggingface_hub.hf_hub_download", side_effect=fake_download):
+                response = self.client.post(
+                    "/api/models/install",
+                    data=json.dumps({
+                        "repoId": "owner/model-GGUF",
+                        "filename": "model-q4_k_m.gguf",
+                        "modelType": "text",
+                        "quantization": "Q4_K_M",
+                    }),
+                    content_type="application/json",
+                    HTTP_AUTHORIZATION=f"Bearer {token}",
+                )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["model"]["status"], "ready")
+        self.assertTrue(Path(payload["model"]["localPath"]).is_file())
+        model = ModelRegistry.objects.get(repo_id="owner/model-GGUF", filename="model-q4_k_m.gguf")
+        self.assertEqual(model.download_progress, 100)
+
+    def test_model_install_returns_error_when_download_fails(self) -> None:
+        model_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(model_dir.cleanup)
+        login = self.client.post(
+            "/api/admin/login",
+            data=json.dumps({"password": "1111"}),
+            content_type="application/json",
+        )
+        token = login.json()["token"]
+
+        with override_settings(TTD_MODEL_DIR=Path(model_dir.name), TTD_ALLOW_HF_DOWNLOAD="1"):
+            with patch("huggingface_hub.hf_hub_download", side_effect=RuntimeError("not found")):
+                response = self.client.post(
+                    "/api/models/install",
+                    data=json.dumps({
+                        "repoId": "owner/broken-GGUF",
+                        "filename": "broken-q4_k_m.gguf",
+                        "modelType": "text",
+                    }),
+                    content_type="application/json",
+                    HTTP_AUTHORIZATION=f"Bearer {token}",
+                )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertFalse(response.json()["ok"])
+        model = ModelRegistry.objects.get(repo_id="owner/broken-GGUF", filename="broken-q4_k_m.gguf")
+        self.assertEqual(model.status, "error")
+        self.assertIn("not found", model.local_path)
 
     def test_root_serves_exported_frontend(self) -> None:
         response = self.client.get("/")

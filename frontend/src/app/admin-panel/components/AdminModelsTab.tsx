@@ -20,6 +20,7 @@ interface ModelEntry {
   systemPrompt: string;
   quantization: string;
   downloadProgress?: number;
+  localPath?: string;
 }
 
 interface InstallForm {
@@ -199,16 +200,24 @@ export default function AdminModelsTab() {
 
   const onInstall = async (data: InstallForm) => {
     setInstalling(true);
-    setInstallProgress(25);
+    setInstallProgress(8);
+    const progressTimer = window.setInterval(() => {
+      setInstallProgress(prev => Math.min(prev + 7, 92));
+    }, 1500);
     try {
-      const payload = await postJson<ModelResponse>('/models/install', data, true);
+      const payload = await postJson<ModelResponse>('/models/install', { ...data, download: true }, true);
       setInstallProgress(100);
-      setModels(prev => [...prev, payload.model]);
+      setModels(prev => {
+        const exists = prev.some(model => model.id === payload.model.id);
+        return exists ? prev.map(model => model.id === payload.model.id ? payload.model : model) : [...prev, payload.model];
+      });
       reset();
-      toast.success(`Model registered: ${data.filename}`);
+      toast.success(`Model installed: ${data.filename}`);
     } catch (error) {
+      loadModels();
       toast.error(error instanceof Error ? error.message : 'Install failed');
     } finally {
+      window.clearInterval(progressTimer);
       setInstalling(false);
     }
   };
@@ -557,6 +566,11 @@ export default function AdminModelsTab() {
             <div className="text-[10px] text-ttd-dim mb-3 truncate" title={model.repoId}>
               {model.repoId}
             </div>
+            {model.localPath && (
+              <div className="text-[10px] text-ttd-dim mb-3 truncate" title={model.localPath}>
+                FILE: {model.localPath}
+              </div>
+            )}
 
             {/* System prompt preview */}
             {model.type !== 'vision' && (

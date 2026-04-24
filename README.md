@@ -102,6 +102,8 @@ The launcher starts:
 - Model files: `models/`
 - llama.cpp source/build: `llamaserver/llama.cpp`
 
+Model installs from the admin panel download the requested HuggingFace `.gguf` file into `models/` by default. Set `TTD_ALLOW_HF_DOWNLOAD=0` only if you intentionally want to block web downloads.
+
 ## Manual Backend
 
 ```bash

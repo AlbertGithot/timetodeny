@@ -86,6 +86,7 @@ def model_to_dict(model: ModelRegistry) -> dict:
         "systemPrompt": model.system_prompt,
         "quantization": model.quantization,
         "downloadProgress": model.download_progress,
+        "localPath": model.local_path,
     }
 
 
