@@ -40,7 +40,7 @@ fi
 
 PYTHON=".venv/bin/python"
 "$PYTHON" -m pip install --upgrade pip
-"$PYTHON" -m pip install -r backend/requirements.txt
+"$PYTHON" -m pip install -r requirements.txt
 
 mkdir -p "$TTD_MODEL_DIR"
 

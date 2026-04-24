@@ -22,7 +22,7 @@ This is the Linux branch. It contains the shared Django/Next.js code and the Lin
 - `manage.py` — Django entrypoint from the repository root.
 - `backend/timetodeny/` — Django project settings, URLs, ASGI/WSGI.
 - `backend/core/` — app models, API views, serializers, llama.cpp service, tests.
-- `backend/requirements.txt` — Python dependencies.
+- `requirements.txt` — Python dependencies.
 - `backend/models/` — local GGUF models; ignored by git.
 - `backend/media/` — generated files/images; ignored by git.
 - `frontend/` — Next.js app, source, assets, and config files.
@@ -48,7 +48,7 @@ The launcher starts:
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -r backend/requirements.txt
+pip install -r requirements.txt
 python manage.py migrate
 python manage.py shell -c "from core.seed import ensure_defaults; ensure_defaults()"
 python manage.py runserver 127.0.0.1:8000
