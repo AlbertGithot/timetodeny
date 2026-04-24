@@ -13,17 +13,41 @@ RUNTIME_DIR="${ROOT_DIR}/.runtime"
 NODE_RUNTIME_DIR="${RUNTIME_DIR}/node"
 NODE_DIST_DIR="${RUNTIME_DIR}/node-dist"
 LLAMA_CPP_RUNTIME_DIR="${RUNTIME_DIR}/llama.cpp"
+STATE_DIR="${RUNTIME_DIR}/state"
+PID_DIR="${STATE_DIR}/pids"
+LOG_DIR="${RUNTIME_DIR}/logs"
 
-BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
+ACTION="${1:-start}"
+case "$ACTION" in
+  start|stop|restart|status|logs|foreground)
+    shift || true
+    ;;
+  *)
+    ACTION="start"
+    ;;
+esac
+
+BACKEND_PID_FILE="${PID_DIR}/backend.pid"
+FRONTEND_PID_FILE="${PID_DIR}/frontend.pid"
+LLAMA_PID_FILE="${PID_DIR}/llama.pid"
+BACKEND_LOG_FILE="${LOG_DIR}/backend.log"
+FRONTEND_LOG_FILE="${LOG_DIR}/frontend.log"
+LLAMA_LOG_FILE="${LOG_DIR}/llama.log"
+
+SERVER_BIND_HOST="${SERVER_BIND_HOST:-0.0.0.0}"
+BACKEND_HOST="${BACKEND_HOST:-$SERVER_BIND_HOST}"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
+FRONTEND_HOST="${FRONTEND_HOST:-$SERVER_BIND_HOST}"
 FRONTEND_PORT="${FRONTEND_PORT:-4028}"
 LLAMA_CPP_HOST="${LLAMA_CPP_HOST:-127.0.0.1}"
 LLAMA_CPP_PORT="${LLAMA_CPP_PORT:-8080}"
 NODE_VERSION="${NODE_VERSION:-24.15.0}"
+PUBLIC_SCHEME="${PUBLIC_SCHEME:-http}"
+PUBLIC_HOST="${PUBLIC_HOST:-}"
+BACKEND_PUBLIC_HOST="${BACKEND_PUBLIC_HOST:-}"
+FRONTEND_PUBLIC_HOST="${FRONTEND_PUBLIC_HOST:-}"
 
 export TTD_MODEL_BACKEND="${TTD_MODEL_BACKEND:-llamacpp}"
-export NEXT_PUBLIC_API_BASE="${NEXT_PUBLIC_API_BASE:-http://${BACKEND_HOST}:${BACKEND_PORT}/api}"
-export TTD_FRONTEND_ORIGIN="${TTD_FRONTEND_ORIGIN:-http://127.0.0.1:${FRONTEND_PORT}}"
 export TTD_LLAMA_CPP_URL="${TTD_LLAMA_CPP_URL:-http://${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}}"
 export TTD_AUTO_UPDATE="${TTD_AUTO_UPDATE:-1}"
 export TTD_AUTO_BOOTSTRAP_LLAMA_CPP="${TTD_AUTO_BOOTSTRAP_LLAMA_CPP:-1}"
@@ -148,6 +172,151 @@ cpu_jobs() {
     return 0
   fi
   echo 2
+}
+
+ensure_runtime_dirs() {
+  mkdir -p "$RUNTIME_DIR" "$STATE_DIR" "$PID_DIR" "$LOG_DIR"
+}
+
+read_pid_file() {
+  local pid_file="$1"
+  [ -f "$pid_file" ] || return 1
+  tr -d '[:space:]' < "$pid_file"
+}
+
+pid_is_running() {
+  local pid="${1:-}"
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" >/dev/null 2>&1
+}
+
+cleanup_stale_pid_file() {
+  local pid_file="$1"
+  local pid=""
+  pid="$(read_pid_file "$pid_file" 2>/dev/null || true)"
+  if [ -n "$pid" ] && ! pid_is_running "$pid"; then
+    rm -f "$pid_file"
+  fi
+}
+
+detect_public_host() {
+  local candidate=""
+
+  if [ -n "$PUBLIC_HOST" ]; then
+    printf '%s\n' "$PUBLIC_HOST"
+    return 0
+  fi
+
+  if command -v hostname >/dev/null 2>&1; then
+    candidate="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  fi
+  if [ -z "$candidate" ] && command -v ip >/dev/null 2>&1; then
+    candidate="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ {for (i=1; i<=NF; i++) if ($i == "src") { print $(i+1); exit }}' || true)"
+  fi
+  if [ -z "$candidate" ] && command -v hostname >/dev/null 2>&1; then
+    candidate="$(hostname -f 2>/dev/null || hostname 2>/dev/null || true)"
+  fi
+
+  printf '%s\n' "${candidate:-127.0.0.1}"
+}
+
+resolve_network_config() {
+  local detected_public_host allowed_hosts
+
+  detected_public_host="$(detect_public_host)"
+  BACKEND_PUBLIC_HOST="${BACKEND_PUBLIC_HOST:-$detected_public_host}"
+  FRONTEND_PUBLIC_HOST="${FRONTEND_PUBLIC_HOST:-$detected_public_host}"
+
+  export NEXT_PUBLIC_API_BASE="${NEXT_PUBLIC_API_BASE:-${PUBLIC_SCHEME}://${BACKEND_PUBLIC_HOST}:${BACKEND_PORT}/api}"
+  export TTD_FRONTEND_ORIGIN="${TTD_FRONTEND_ORIGIN:-${PUBLIC_SCHEME}://${FRONTEND_PUBLIC_HOST}:${FRONTEND_PORT}}"
+
+  allowed_hosts="127.0.0.1,localhost,0.0.0.0,${BACKEND_PUBLIC_HOST},${FRONTEND_PUBLIC_HOST}"
+  if command -v hostname >/dev/null 2>&1; then
+    allowed_hosts="${allowed_hosts},$(hostname 2>/dev/null || true),$(hostname -f 2>/dev/null || true)"
+  fi
+  export DJANGO_ALLOWED_HOSTS="${DJANGO_ALLOWED_HOSTS:-$allowed_hosts}"
+}
+
+spawn_detached() {
+  local name="$1"
+  local pid_file="$2"
+  local log_file="$3"
+  local workdir="$4"
+  shift 4
+
+  cleanup_stale_pid_file "$pid_file"
+  local existing_pid=""
+  existing_pid="$(read_pid_file "$pid_file" 2>/dev/null || true)"
+  if [ -n "$existing_pid" ] && pid_is_running "$existing_pid"; then
+    echo "${name} is already running (pid ${existing_pid})"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$pid_file")" "$(dirname "$log_file")"
+  (
+    cd "$workdir"
+    if command -v setsid >/dev/null 2>&1; then
+      setsid "$@" >>"$log_file" 2>&1 </dev/null &
+    else
+      nohup "$@" >>"$log_file" 2>&1 </dev/null &
+    fi
+    echo $! > "$pid_file"
+  )
+
+  sleep 1
+  local started_pid=""
+  started_pid="$(read_pid_file "$pid_file" 2>/dev/null || true)"
+  if [ -z "$started_pid" ] || ! pid_is_running "$started_pid"; then
+    echo "${name} failed to start. Last log lines:"
+    tail -n 40 "$log_file" 2>/dev/null || true
+    return 1
+  fi
+
+  echo "${name} started (pid ${started_pid})"
+}
+
+stop_from_pid_file() {
+  local name="$1"
+  local pid_file="$2"
+  local pid=""
+  pid="$(read_pid_file "$pid_file" 2>/dev/null || true)"
+
+  if [ -z "$pid" ]; then
+    echo "${name} is not running"
+    return 0
+  fi
+
+  if ! pid_is_running "$pid"; then
+    rm -f "$pid_file"
+    echo "${name} was already stopped"
+    return 0
+  fi
+
+  kill "$pid" >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if ! pid_is_running "$pid"; then
+      rm -f "$pid_file"
+      echo "${name} stopped"
+      return 0
+    fi
+    sleep 1
+  done
+
+  kill -9 "$pid" >/dev/null 2>&1 || true
+  rm -f "$pid_file"
+  echo "${name} force-stopped"
+}
+
+print_process_status() {
+  local name="$1"
+  local pid_file="$2"
+  local pid=""
+  pid="$(read_pid_file "$pid_file" 2>/dev/null || true)"
+  if [ -n "$pid" ] && pid_is_running "$pid"; then
+    echo "${name}: running (pid ${pid})"
+  else
+    echo "${name}: stopped"
+  fi
 }
 
 resolve_repo_layout() {
@@ -490,94 +659,178 @@ ensure_node_runtime() {
 }
 
 add_local_node_to_path
-auto_update_repo "$@"
-resolve_repo_layout
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "python3 is required"
-  exit 1
-fi
+prepare_runtime_environment() {
+  ensure_runtime_dirs
+  auto_update_repo "$ACTION" "$@"
+  resolve_repo_layout
+  resolve_network_config
 
-if ! ensure_node_runtime; then
-  exit 1
-fi
-
-if [ ! -d ".venv" ]; then
-  python3 -m venv .venv
-fi
-
-PYTHON=".venv/bin/python"
-"$PYTHON" -m pip install --upgrade pip
-"$PYTHON" -m pip install -r "$REQUIREMENTS_FILE"
-
-mkdir -p "$TTD_MODEL_DIR"
-
-if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
-  (
-    cd "$FRONTEND_DIR"
-    npm install
-  )
-fi
-
-"$PYTHON" "$MANAGE_PY" migrate --noinput
-"$PYTHON" "$MANAGE_PY" shell -c "from core.seed import ensure_defaults; ensure_defaults()"
-
-cleanup() {
-  if [ -n "${BACKEND_PID:-}" ]; then
-    kill "$BACKEND_PID" >/dev/null 2>&1 || true
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required"
+    exit 1
   fi
-  if [ -n "${LLAMA_PID:-}" ]; then
-    kill "$LLAMA_PID" >/dev/null 2>&1 || true
+
+  if ! ensure_node_runtime; then
+    exit 1
+  fi
+
+  if [ ! -d ".venv" ]; then
+    python3 -m venv .venv
+  fi
+
+  PYTHON=".venv/bin/python"
+  export PYTHON
+  "$PYTHON" -m pip install --upgrade pip
+  "$PYTHON" -m pip install -r "$REQUIREMENTS_FILE"
+
+  mkdir -p "$TTD_MODEL_DIR"
+
+  if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
+    (
+      cd "$FRONTEND_DIR"
+      npm install
+    )
+  fi
+
+  NEXT_BIN="${FRONTEND_DIR}/node_modules/.bin/next"
+  if [ ! -x "$NEXT_BIN" ]; then
+    echo "Next.js binary not found: ${NEXT_BIN}"
+    exit 1
+  fi
+
+  "$PYTHON" "$MANAGE_PY" migrate --noinput
+  "$PYTHON" "$MANAGE_PY" shell -c "from core.seed import ensure_defaults; ensure_defaults()"
+
+  if [ "$TTD_MODEL_BACKEND" = "llamacpp" ]; then
+    LLAMA_CPP_BIN="${LLAMA_CPP_BIN:-}"
+    if ! resolve_llama_cpp_bin && ! bootstrap_llama_cpp && ! resolve_llama_cpp_bin; then
+      echo "llama-server not found. Searched PATH, repo directories, \$HOME/llama.cpp, \$HOME/.local/bin, /usr/local, and /opt."
+      echo "Auto-bootstrap also failed. Install build tools (git, cmake or make, and a C++ compiler) or set LLAMA_CPP_BIN manually."
+      exit 1
+    fi
+    if ! resolve_llama_model_path; then
+      echo "No GGUF model found."
+      echo "Searched model directories around the repo, ${TTD_MODEL_DIR}, \$HOME/models, \$HOME/project, and llama.cpp model folders."
+      echo "Put a .gguf file into: $TTD_MODEL_DIR"
+      echo "Or set LLAMA_CPP_MODEL_PATH=/full/path/model.gguf"
+      echo "For UI-only dev without llama.cpp: TTD_MODEL_BACKEND=mock ./linux.sh"
+      exit 1
+    fi
+    if [ ! -f "$LLAMA_CPP_MODEL_PATH" ]; then
+      echo "LLAMA_CPP_MODEL_PATH does not exist: $LLAMA_CPP_MODEL_PATH"
+      exit 1
+    fi
+
+    LLAMA_ARGS=(
+      "-m" "$LLAMA_CPP_MODEL_PATH"
+      "--host" "$LLAMA_CPP_HOST"
+      "--port" "$LLAMA_CPP_PORT"
+      "-c" "${LLAMA_CPP_CTX_SIZE:-8192}"
+    )
+    if [ -n "${LLAMA_CPP_THREADS:-}" ]; then
+      LLAMA_ARGS+=("-t" "$LLAMA_CPP_THREADS")
+    fi
+    if [ -n "${LLAMA_CPP_GPU_LAYERS:-}" ]; then
+      LLAMA_ARGS+=("-ngl" "$LLAMA_CPP_GPU_LAYERS")
+    fi
   fi
 }
-trap cleanup EXIT INT TERM
 
-if [ "$TTD_MODEL_BACKEND" = "llamacpp" ]; then
-  LLAMA_CPP_BIN="${LLAMA_CPP_BIN:-}"
-  if ! resolve_llama_cpp_bin && ! bootstrap_llama_cpp && ! resolve_llama_cpp_bin; then
-    echo "llama-server not found. Searched PATH, repo directories, \$HOME/llama.cpp, \$HOME/.local/bin, /usr/local, and /opt."
-    echo "Auto-bootstrap also failed. Install build tools (git, cmake or make, and a C++ compiler) or set LLAMA_CPP_BIN manually."
-    exit 1
-  fi
-  if ! resolve_llama_model_path; then
-    echo "No GGUF model found."
-    echo "Searched model directories around the repo, ${TTD_MODEL_DIR}, \$HOME/models, \$HOME/project, and llama.cpp model folders."
-    echo "Put a .gguf file into: $TTD_MODEL_DIR"
-    echo "Or set LLAMA_CPP_MODEL_PATH=/full/path/model.gguf"
-    echo "For UI-only dev without llama.cpp: TTD_MODEL_BACKEND=mock ./linux.sh"
-    exit 1
-  fi
-  if [ ! -f "$LLAMA_CPP_MODEL_PATH" ]; then
-    echo "LLAMA_CPP_MODEL_PATH does not exist: $LLAMA_CPP_MODEL_PATH"
-    exit 1
+start_stack_detached() {
+  prepare_runtime_environment "$@"
+
+  if [ "$TTD_MODEL_BACKEND" = "llamacpp" ]; then
+    spawn_detached "llama.cpp" "$LLAMA_PID_FILE" "$LLAMA_LOG_FILE" "$ROOT_DIR" "$LLAMA_CPP_BIN" "${LLAMA_ARGS[@]}"
   fi
 
-  LLAMA_ARGS=(
-    "-m" "$LLAMA_CPP_MODEL_PATH"
-    "--host" "$LLAMA_CPP_HOST"
-    "--port" "$LLAMA_CPP_PORT"
-    "-c" "${LLAMA_CPP_CTX_SIZE:-8192}"
-  )
-  if [ -n "${LLAMA_CPP_THREADS:-}" ]; then
-    LLAMA_ARGS+=("-t" "$LLAMA_CPP_THREADS")
+  spawn_detached "backend" "$BACKEND_PID_FILE" "$BACKEND_LOG_FILE" "$ROOT_DIR" \
+    "$PYTHON" "$MANAGE_PY" runserver "${BACKEND_HOST}:${BACKEND_PORT}" --noreload
+
+  spawn_detached "frontend" "$FRONTEND_PID_FILE" "$FRONTEND_LOG_FILE" "$FRONTEND_DIR" \
+    "$NEXT_BIN" dev -H "$FRONTEND_HOST" -p "$FRONTEND_PORT"
+
+  echo "Backend API: ${NEXT_PUBLIC_API_BASE}"
+  echo "Frontend:    ${TTD_FRONTEND_ORIGIN}"
+  echo "Admin:       ${TTD_FRONTEND_ORIGIN}/admin-panel"
+  echo "Logs:        ${LOG_DIR}"
+}
+
+start_stack_foreground() {
+  prepare_runtime_environment "$@"
+
+  cleanup() {
+    if [ -n "${BACKEND_PID:-}" ]; then
+      kill "$BACKEND_PID" >/dev/null 2>&1 || true
+    fi
+    if [ -n "${FRONTEND_PID:-}" ]; then
+      kill "$FRONTEND_PID" >/dev/null 2>&1 || true
+    fi
+    if [ -n "${LLAMA_PID:-}" ]; then
+      kill "$LLAMA_PID" >/dev/null 2>&1 || true
+    fi
+  }
+  trap cleanup EXIT INT TERM
+
+  if [ "$TTD_MODEL_BACKEND" = "llamacpp" ]; then
+    "$LLAMA_CPP_BIN" "${LLAMA_ARGS[@]}" &
+    LLAMA_PID=$!
+    echo "llama.cpp: ${TTD_LLAMA_CPP_URL}"
   fi
-  if [ -n "${LLAMA_CPP_GPU_LAYERS:-}" ]; then
-    LLAMA_ARGS+=("-ngl" "$LLAMA_CPP_GPU_LAYERS")
-  fi
 
-  "$LLAMA_CPP_BIN" "${LLAMA_ARGS[@]}" &
-  LLAMA_PID=$!
-  echo "llama.cpp: ${TTD_LLAMA_CPP_URL}"
-fi
+  "$PYTHON" "$MANAGE_PY" runserver "${BACKEND_HOST}:${BACKEND_PORT}" &
+  BACKEND_PID=$!
 
-"$PYTHON" "$MANAGE_PY" runserver "${BACKEND_HOST}:${BACKEND_PORT}" &
-BACKEND_PID=$!
+  echo "Backend API: ${NEXT_PUBLIC_API_BASE}"
+  echo "Frontend:    ${TTD_FRONTEND_ORIGIN}"
+  echo "Admin:       ${TTD_FRONTEND_ORIGIN}/admin-panel"
 
-echo "Backend:  http://${BACKEND_HOST}:${BACKEND_PORT}"
-echo "Frontend: http://127.0.0.1:${FRONTEND_PORT}"
-echo "Admin:    http://127.0.0.1:${FRONTEND_PORT}/admin-panel"
+  (
+    cd "$FRONTEND_DIR"
+    "$NEXT_BIN" dev -H "$FRONTEND_HOST" -p "$FRONTEND_PORT"
+  ) &
+  FRONTEND_PID=$!
+  wait "$FRONTEND_PID"
+}
 
-(
-  cd "$FRONTEND_DIR"
-  npm run dev
-)
+stop_stack() {
+  stop_from_pid_file "frontend" "$FRONTEND_PID_FILE"
+  stop_from_pid_file "backend" "$BACKEND_PID_FILE"
+  stop_from_pid_file "llama.cpp" "$LLAMA_PID_FILE"
+}
+
+show_status() {
+  print_process_status "frontend" "$FRONTEND_PID_FILE"
+  print_process_status "backend" "$BACKEND_PID_FILE"
+  print_process_status "llama.cpp" "$LLAMA_PID_FILE"
+}
+
+show_logs() {
+  ensure_runtime_dirs
+  touch "$BACKEND_LOG_FILE" "$FRONTEND_LOG_FILE" "$LLAMA_LOG_FILE"
+  tail -n "${TAIL_LINES:-120}" -f "$BACKEND_LOG_FILE" "$FRONTEND_LOG_FILE" "$LLAMA_LOG_FILE"
+}
+
+ensure_runtime_dirs
+
+case "$ACTION" in
+  start)
+    start_stack_detached "$@"
+    ;;
+  stop)
+    stop_stack
+    ;;
+  restart)
+    stop_stack
+    start_stack_detached "$@"
+    ;;
+  status)
+    show_status
+    ;;
+  logs)
+    show_logs
+    ;;
+  foreground)
+    start_stack_foreground "$@"
+    ;;
+esac
