@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
+SCRIPT_PATH="${ROOT_DIR}/$(basename "${BASH_SOURCE[0]}")"
 BACKEND_DIR="${ROOT_DIR}/backend"
 FRONTEND_DIR="${ROOT_DIR}/frontend"
 MANAGE_PY="${ROOT_DIR}/manage.py"
@@ -23,6 +24,59 @@ export TTD_MODEL_DIR="${TTD_MODEL_DIR:-${ROOT_DIR}/backend/models}"
 export NEXT_PUBLIC_API_BASE="${NEXT_PUBLIC_API_BASE:-http://${BACKEND_HOST}:${BACKEND_PORT}/api}"
 export TTD_FRONTEND_ORIGIN="${TTD_FRONTEND_ORIGIN:-http://127.0.0.1:${FRONTEND_PORT}}"
 export TTD_LLAMA_CPP_URL="${TTD_LLAMA_CPP_URL:-http://${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}}"
+export TTD_AUTO_UPDATE="${TTD_AUTO_UPDATE:-1}"
+
+auto_update_repo() {
+  local current_branch before_head after_head upstream_ref
+
+  if [ "$TTD_AUTO_UPDATE" != "1" ]; then
+    return 0
+  fi
+
+  if ! command -v git >/dev/null 2>&1; then
+    echo "Skipping auto-update: git is not installed"
+    return 0
+  fi
+
+  if [ ! -d "${ROOT_DIR}/.git" ]; then
+    return 0
+  fi
+
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "Skipping auto-update: repository has local changes"
+    return 0
+  fi
+
+  current_branch="$(git branch --show-current 2>/dev/null || true)"
+  if [ -z "$current_branch" ]; then
+    echo "Skipping auto-update: detached HEAD"
+    return 0
+  fi
+
+  if ! git ls-remote --exit-code --heads origin "$current_branch" >/dev/null 2>&1; then
+    echo "Skipping auto-update: origin/${current_branch} not found"
+    return 0
+  fi
+
+  before_head="$(git rev-parse HEAD)"
+  upstream_ref="origin/${current_branch}"
+
+  if ! git fetch --quiet origin "$current_branch"; then
+    echo "Skipping auto-update: failed to fetch origin/${current_branch}"
+    return 0
+  fi
+
+  if ! git merge --ff-only --quiet "$upstream_ref" >/dev/null 2>&1; then
+    echo "Skipping auto-update: fast-forward merge failed"
+    return 0
+  fi
+
+  after_head="$(git rev-parse HEAD)"
+  if [ "$before_head" != "$after_head" ]; then
+    echo "Repository updated from ${upstream_ref}. Restarting launcher..."
+    exec "$SCRIPT_PATH" "$@"
+  fi
+}
 
 add_local_node_to_path() {
   if [ -x "${NODE_RUNTIME_DIR}/current/bin/node" ]; then
@@ -104,6 +158,7 @@ ensure_node_runtime() {
 }
 
 add_local_node_to_path
+auto_update_repo "$@"
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "python3 is required"
