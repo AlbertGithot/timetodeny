@@ -225,9 +225,9 @@ resolve_network_config() {
   detected_public_host="$(detect_public_host)"
   BACKEND_PUBLIC_HOST="${BACKEND_PUBLIC_HOST:-$detected_public_host}"
 
-  export NEXT_PUBLIC_API_BASE="${NEXT_PUBLIC_API_BASE:-/api}"
-  export TTD_FRONTEND_ORIGIN="${TTD_FRONTEND_ORIGIN:-${PUBLIC_SCHEME}://${BACKEND_PUBLIC_HOST}:${BACKEND_PORT}}"
-  export TTD_FRONTEND_INTERNAL_URL="${TTD_FRONTEND_INTERNAL_URL:-http://${FRONTEND_HOST}:${FRONTEND_PORT}}"
+  export NEXT_PUBLIC_API_BASE="/api"
+  export TTD_FRONTEND_ORIGIN="${PUBLIC_SCHEME}://${BACKEND_PUBLIC_HOST}:${BACKEND_PORT}"
+  export TTD_FRONTEND_INTERNAL_URL="http://${FRONTEND_HOST}:${FRONTEND_PORT}"
 
   allowed_hosts="127.0.0.1,localhost,0.0.0.0,${BACKEND_PUBLIC_HOST}"
   if command -v hostname >/dev/null 2>&1; then

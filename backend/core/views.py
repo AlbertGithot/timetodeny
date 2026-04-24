@@ -5,6 +5,7 @@ import time
 from io import StringIO
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 from uuid import UUID
 
 from django.conf import settings
@@ -98,6 +99,22 @@ def frontend_proxy(request: HttpRequest, proxy_path: str = ""):
         return _frontend_unavailable_response(request, exc)
 
 
+def _public_frontend_origin(request: HttpRequest) -> str:
+    configured = settings.TTD_FRONTEND_ORIGIN.rstrip("/")
+    parsed = urlparse(configured)
+    configured_host = (parsed.hostname or "").lower()
+    request_host = request.get_host()
+    request_hostname = request_host.split(":", 1)[0].lower()
+
+    if configured_host in {"127.0.0.1", "localhost", "0.0.0.0"} and request_hostname not in {
+        "127.0.0.1",
+        "localhost",
+        "0.0.0.0",
+    }:
+        return f"{request.scheme}://{request_host}"
+    return configured
+
+
 def _frontend_target_url(request: HttpRequest) -> str:
     full_path = request.get_full_path()
     if not full_path.startswith("/"):
@@ -116,6 +133,7 @@ def _frontend_proxy_response(upstream) -> HttpResponse:
 
 def _frontend_unavailable_response(request: HttpRequest, exc: urllib.error.URLError) -> HttpResponse:
     error_text = str(getattr(exc, "reason", exc))
+    public_frontend_origin = _public_frontend_origin(request)
     if "text/html" not in request.headers.get("Accept", "") and request.path.startswith("/api"):
         return json_response(
             {
@@ -145,7 +163,7 @@ def _frontend_unavailable_response(request: HttpRequest, exc: urllib.error.URLEr
   <body>
     <main>
       <h1>Frontend is not running</h1>
-      <p>Django is reachable on <code>{settings.TTD_FRONTEND_ORIGIN}</code>, but the internal Next.js process at <code>{settings.TTD_FRONTEND_INTERNAL_URL}</code> did not answer.</p>
+      <p>Django is reachable on <code>{public_frontend_origin}</code>, but the internal Next.js process at <code>{settings.TTD_FRONTEND_INTERNAL_URL}</code> did not answer.</p>
       <p>Start the stack with <code>./linux.sh start</code> and then check <code>./linux.sh logs</code> if it still acts like a genius.</p>
       <p>API health stays available at <a href="/api/health">/api/health</a>.</p>
       <p>Proxy error: <code>{error_text}</code></p>
@@ -156,11 +174,12 @@ def _frontend_unavailable_response(request: HttpRequest, exc: urllib.error.URLEr
 
 
 def api_index(request: HttpRequest):
+    public_frontend_origin = _public_frontend_origin(request)
     return json_response(
         {
             "ok": True,
             "service": "timetodeny-backend",
-            "frontend": settings.TTD_FRONTEND_ORIGIN,
+            "frontend": public_frontend_origin,
             "health": "/api/health",
             "note": "The chat UI is served on / through Django proxying to the internal Next.js process.",
         }

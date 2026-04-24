@@ -1,5 +1,28 @@
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '0.0.0.0']);
 const RAW_API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/api';
-export const API_BASE = RAW_API_BASE.endsWith('/') && RAW_API_BASE !== '/' ? RAW_API_BASE.slice(0, -1) : RAW_API_BASE;
+
+function normalizeApiBase(value: string): string {
+  return value.endsWith('/') && value !== '/' ? value.slice(0, -1) : value;
+}
+
+function resolveApiBase(): string {
+  const normalized = normalizeApiBase(RAW_API_BASE);
+  if (typeof window === 'undefined') return normalized;
+
+  try {
+    const resolved = new URL(normalized, window.location.origin);
+    const siteHost = window.location.hostname;
+    if (LOOPBACK_HOSTS.has(resolved.hostname) && !LOOPBACK_HOSTS.has(siteHost)) {
+      return '/api';
+    }
+  } catch {
+    return normalized;
+  }
+
+  return normalized;
+}
+
+export const API_BASE = resolveApiBase();
 
 export function apiUrl(path: string): string {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
