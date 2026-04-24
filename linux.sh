@@ -50,6 +50,7 @@ export TTD_MODEL_BACKEND="${TTD_MODEL_BACKEND:-llamacpp}"
 export TTD_LLAMA_CPP_URL="${TTD_LLAMA_CPP_URL:-http://${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}}"
 export TTD_AUTO_UPDATE="${TTD_AUTO_UPDATE:-1}"
 export TTD_AUTO_BOOTSTRAP_LLAMA_CPP="${TTD_AUTO_BOOTSTRAP_LLAMA_CPP:-1}"
+export TTD_FORCE_TAKE_PORTS="${TTD_FORCE_TAKE_PORTS:-1}"
 export LLAMA_CPP_REPO_URL="${LLAMA_CPP_REPO_URL:-https://github.com/ggml-org/llama.cpp.git}"
 export LLAMA_CPP_REPO_REF="${LLAMA_CPP_REPO_REF:-master}"
 
@@ -195,6 +196,123 @@ cleanup_stale_pid_file() {
   pid="$(read_pid_file "$pid_file" 2>/dev/null || true)"
   if [ -n "$pid" ] && ! pid_is_running "$pid"; then
     rm -f "$pid_file"
+  fi
+}
+
+port_listener_pids() {
+  local port="$1"
+
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk '!seen[$0]++'
+    return 0
+  fi
+
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp "( sport = :$port )" 2>/dev/null | sed -nE 's/.*pid=([0-9]+).*/\1/p' | awk '!seen[$0]++'
+    return 0
+  fi
+
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -n tcp "$port" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | awk '!seen[$0]++'
+    return 0
+  fi
+
+  return 0
+}
+
+pid_command() {
+  local pid="$1"
+  ps -p "$pid" -o command= 2>/dev/null | sed 's/^[[:space:]]*//' || true
+}
+
+pid_parent() {
+  local pid="$1"
+  ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]' || true
+}
+
+kill_process_for_port() {
+  local pid="$1"
+  local service_name="$2"
+  local port="$3"
+  local cmd parent_pid parent_cmd
+
+  cmd="$(pid_command "$pid")"
+  parent_pid="$(pid_parent "$pid")"
+  parent_cmd=""
+  if [ -n "$parent_pid" ]; then
+    parent_cmd="$(pid_command "$parent_pid")"
+  fi
+
+  echo "Reclaiming ${service_name} port ${port} from pid ${pid}: ${cmd:-unknown}"
+
+  if [ "$service_name" = "backend" ]; then
+    pkill -f "manage.py runserver .*:${port}" >/dev/null 2>&1 || true
+    pkill -f "manage.py runserver 0.0.0.0:${port}" >/dev/null 2>&1 || true
+    pkill -f "manage.py runserver 127.0.0.1:${port}" >/dev/null 2>&1 || true
+  elif [ "$service_name" = "frontend" ]; then
+    pkill -f "next .* -p ${port}" >/dev/null 2>&1 || true
+    pkill -f "next .* -p[ =]${port}" >/dev/null 2>&1 || true
+  elif [ "$service_name" = "llama.cpp" ]; then
+    pkill -f "llama-server .*--port ${port}" >/dev/null 2>&1 || true
+  fi
+
+  if [ -n "$parent_pid" ] && [ -n "$parent_cmd" ]; then
+    case "$service_name:$parent_cmd" in
+      backend:*manage.py\ runserver*|frontend:*next\ *|llama.cpp:*llama-server*)
+        kill "$parent_pid" >/dev/null 2>&1 || true
+        ;;
+    esac
+  fi
+
+  kill "$pid" >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5; do
+    if ! pid_is_running "$pid"; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  kill -9 "$pid" >/dev/null 2>&1 || true
+}
+
+ensure_port_available() {
+  local service_name="$1"
+  local pid_file="$2"
+  local port="$3"
+  local managed_pid pid remaining=()
+  local listeners_raw
+
+  cleanup_stale_pid_file "$pid_file"
+  managed_pid="$(read_pid_file "$pid_file" 2>/dev/null || true)"
+  listeners_raw="$(port_listener_pids "$port" || true)"
+  [ -n "$listeners_raw" ] || return 0
+
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    if [ -n "$managed_pid" ] && [ "$pid" = "$managed_pid" ]; then
+      continue
+    fi
+    remaining+=("$pid")
+  done <<EOF
+$listeners_raw
+EOF
+
+  [ "${#remaining[@]}" -gt 0 ] || return 0
+
+  if [ "$TTD_FORCE_TAKE_PORTS" != "1" ]; then
+    echo "Port ${port} is occupied by unmanaged process(es): ${remaining[*]}"
+    echo "Set TTD_FORCE_TAKE_PORTS=1 to let the launcher reclaim it automatically."
+    exit 1
+  fi
+
+  for pid in "${remaining[@]}"; do
+    kill_process_for_port "$pid" "$service_name" "$port"
+  done
+
+  listeners_raw="$(port_listener_pids "$port" || true)"
+  if [ -n "$listeners_raw" ]; then
+    echo "Failed to reclaim port ${port} for ${service_name}. Still occupied by: ${listeners_raw}"
+    exit 1
   fi
 }
 
@@ -749,12 +867,15 @@ start_stack_detached() {
   build_frontend_release
 
   if [ "$TTD_MODEL_BACKEND" = "llamacpp" ]; then
+    ensure_port_available "llama.cpp" "$LLAMA_PID_FILE" "$LLAMA_CPP_PORT"
     spawn_detached "llama.cpp" "$LLAMA_PID_FILE" "$LLAMA_LOG_FILE" "$ROOT_DIR" "$LLAMA_CPP_BIN" "${LLAMA_ARGS[@]}"
   fi
 
+  ensure_port_available "backend" "$BACKEND_PID_FILE" "$BACKEND_PORT"
   spawn_detached "backend" "$BACKEND_PID_FILE" "$BACKEND_LOG_FILE" "$ROOT_DIR" \
     "$PYTHON" "$MANAGE_PY" runserver "${BACKEND_HOST}:${BACKEND_PORT}" --noreload
 
+  ensure_port_available "frontend" "$FRONTEND_PID_FILE" "$FRONTEND_PORT"
   spawn_detached "frontend" "$FRONTEND_PID_FILE" "$FRONTEND_LOG_FILE" "$FRONTEND_DIR" \
     "$NEXT_BIN" start -H "$FRONTEND_HOST" -p "$FRONTEND_PORT"
 
@@ -782,11 +903,13 @@ start_stack_foreground() {
   trap cleanup EXIT INT TERM
 
   if [ "$TTD_MODEL_BACKEND" = "llamacpp" ]; then
+    ensure_port_available "llama.cpp" "$LLAMA_PID_FILE" "$LLAMA_CPP_PORT"
     "$LLAMA_CPP_BIN" "${LLAMA_ARGS[@]}" &
     LLAMA_PID=$!
     echo "llama.cpp: ${TTD_LLAMA_CPP_URL}"
   fi
 
+  ensure_port_available "backend" "$BACKEND_PID_FILE" "$BACKEND_PORT"
   "$PYTHON" "$MANAGE_PY" runserver "${BACKEND_HOST}:${BACKEND_PORT}" &
   BACKEND_PID=$!
 
@@ -797,6 +920,7 @@ start_stack_foreground() {
 
   (
     cd "$FRONTEND_DIR"
+    ensure_port_available "frontend" "$FRONTEND_PID_FILE" "$FRONTEND_PORT"
     "$NEXT_BIN" dev -H "$FRONTEND_HOST" -p "$FRONTEND_PORT"
   ) &
   FRONTEND_PID=$!
