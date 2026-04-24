@@ -19,13 +19,13 @@ This is the Linux branch. It contains the shared Django/Next.js code and the Lin
 
 ## Project Layout
 
-- `manage.py` — Django entrypoint from the repository root.
+- `backend/manage.py` — Django entrypoint.
 - `backend/timetodeny/` — Django project settings, URLs, ASGI/WSGI.
 - `backend/core/` — app models, API views, serializers, llama.cpp service, tests.
 - `backend/requirements.txt` — Python dependencies.
 - `backend/models/` — local GGUF models; ignored by git.
 - `backend/media/` — generated files/images; ignored by git.
-- `src/` — Next.js frontend.
+- `frontend/` — Next.js app, source, assets, and config files.
 - `launchers/linux.sh` — Linux launcher that starts llama.cpp, Django, and Next.js.
 
 ## Launch
@@ -49,14 +49,15 @@ The launcher starts:
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r backend/requirements.txt
-python manage.py migrate
-python manage.py shell -c "from core.seed import ensure_defaults; ensure_defaults()"
-python manage.py runserver 127.0.0.1:8000
+python backend/manage.py migrate
+python backend/manage.py shell -c "from core.seed import ensure_defaults; ensure_defaults()"
+python backend/manage.py runserver 127.0.0.1:8000
 ```
 
 ## Manual Frontend
 
 ```bash
+cd frontend
 npm install
 NEXT_PUBLIC_API_BASE=http://127.0.0.1:8000/api npm run dev
 ```

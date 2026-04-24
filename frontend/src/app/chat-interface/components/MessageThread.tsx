@@ -8,7 +8,7 @@ import type { Message, GeneratedFile } from './ChatInterfaceClient';
 interface Props {
   messages: Message[];
   isStreaming: boolean;
-  messagesEndRef: React.RefObject<HTMLDivElement>;
+  messagesEndRef: React.RefObject<HTMLDivElement | null>;
 }
 
 function CodeBlock({ file }: { file: GeneratedFile }) {

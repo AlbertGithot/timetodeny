@@ -70,7 +70,5 @@ def ensure_defaults() -> None:
     ]
 
     for item in defaults:
-        ModelRegistry.objects.get_or_create(
-            name=item["name"],
-            defaults=item,
-        )
+        if not ModelRegistry.objects.filter(name=item["name"]).exists():
+            ModelRegistry.objects.create(**item)

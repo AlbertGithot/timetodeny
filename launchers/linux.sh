@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+BACKEND_DIR="${ROOT_DIR}/backend"
+FRONTEND_DIR="${ROOT_DIR}/frontend"
+MANAGE_PY="${BACKEND_DIR}/manage.py"
+
 BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-4028}"
@@ -40,12 +44,15 @@ PYTHON=".venv/bin/python"
 
 mkdir -p "$TTD_MODEL_DIR"
 
-if [ ! -d "node_modules" ]; then
-  npm install
+if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
+  (
+    cd "$FRONTEND_DIR"
+    npm install
+  )
 fi
 
-"$PYTHON" manage.py migrate --noinput
-"$PYTHON" manage.py shell -c "from core.seed import ensure_defaults; ensure_defaults()"
+"$PYTHON" "$MANAGE_PY" migrate --noinput
+"$PYTHON" "$MANAGE_PY" shell -c "from core.seed import ensure_defaults; ensure_defaults()"
 
 cleanup() {
   if [ -n "${BACKEND_PID:-}" ]; then
@@ -100,11 +107,14 @@ if [ "$TTD_MODEL_BACKEND" = "llamacpp" ]; then
   echo "llama.cpp: ${TTD_LLAMA_CPP_URL}"
 fi
 
-"$PYTHON" manage.py runserver "${BACKEND_HOST}:${BACKEND_PORT}" &
+"$PYTHON" "$MANAGE_PY" runserver "${BACKEND_HOST}:${BACKEND_PORT}" &
 BACKEND_PID=$!
 
 echo "Backend:  http://${BACKEND_HOST}:${BACKEND_PORT}"
 echo "Frontend: http://127.0.0.1:${FRONTEND_PORT}"
 echo "Admin:    http://127.0.0.1:${FRONTEND_PORT}/admin-panel"
 
-npm run dev
+(
+  cd "$FRONTEND_DIR"
+  npm run dev
+)
