@@ -26,7 +26,7 @@ urlpatterns = [
     path("api/admin/server", views.admin_server),
     path("api/admin/sessions", views.admin_sessions),
     path("", views.index),
-    re_path(r"^(?!api(?:/|$)|media(?:/|$)).*$", views.frontend_proxy),
+    re_path(r"^(?!api(?:/|$)|media(?:/|$)).*$", views.frontend_entry),
 ]
 
 if settings.DEBUG:

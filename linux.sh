@@ -37,8 +37,7 @@ LLAMA_LOG_FILE="${LOG_DIR}/llama.log"
 SERVER_BIND_HOST="${SERVER_BIND_HOST:-0.0.0.0}"
 BACKEND_HOST="${BACKEND_HOST:-$SERVER_BIND_HOST}"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
-FRONTEND_HOST="${FRONTEND_HOST:-127.0.0.1}"
-FRONTEND_PORT="${FRONTEND_PORT:-4028}"
+STALE_NEXT_PORT="${STALE_NEXT_PORT:-4028}"
 LLAMA_CPP_HOST="${LLAMA_CPP_HOST:-127.0.0.1}"
 LLAMA_CPP_PORT="${LLAMA_CPP_PORT:-8080}"
 NODE_VERSION="${NODE_VERSION:-24.15.0}"
@@ -51,6 +50,7 @@ export TTD_LLAMA_CPP_URL="${TTD_LLAMA_CPP_URL:-http://${LLAMA_CPP_HOST}:${LLAMA_
 export TTD_AUTO_UPDATE="${TTD_AUTO_UPDATE:-1}"
 export TTD_AUTO_BOOTSTRAP_LLAMA_CPP="${TTD_AUTO_BOOTSTRAP_LLAMA_CPP:-1}"
 export TTD_FORCE_TAKE_PORTS="${TTD_FORCE_TAKE_PORTS:-1}"
+export TTD_UPGRADE_PIP="${TTD_UPGRADE_PIP:-0}"
 export LLAMA_CPP_REPO_URL="${LLAMA_CPP_REPO_URL:-https://github.com/ggml-org/llama.cpp.git}"
 export LLAMA_CPP_REPO_REF="${LLAMA_CPP_REPO_REF:-master}"
 
@@ -345,7 +345,6 @@ resolve_network_config() {
 
   export NEXT_PUBLIC_API_BASE="/api"
   export TTD_FRONTEND_ORIGIN="${PUBLIC_SCHEME}://${BACKEND_PUBLIC_HOST}:${BACKEND_PORT}"
-  export TTD_FRONTEND_INTERNAL_URL="http://${FRONTEND_HOST}:${FRONTEND_PORT}"
 
   allowed_hosts="127.0.0.1,localhost,0.0.0.0,${BACKEND_PUBLIC_HOST}"
   if command -v hostname >/dev/null 2>&1; then
@@ -487,6 +486,7 @@ resolve_repo_layout() {
     exit 1
   fi
   BACKEND_DIR="$(cd "$(dirname "$settings_file")/.." && pwd)"
+  export TTD_FRONTEND_BUILD_ROOT="${TTD_FRONTEND_BUILD_ROOT:-${FRONTEND_DIR}/out}"
 
   model_dir_override="${TTD_MODEL_DIR:-}"
   if [ -n "$model_dir_override" ]; then
@@ -798,8 +798,10 @@ prepare_runtime_environment() {
 
   PYTHON=".venv/bin/python"
   export PYTHON
-  "$PYTHON" -m pip install --upgrade pip
-  "$PYTHON" -m pip install -r "$REQUIREMENTS_FILE"
+  if [ "$TTD_UPGRADE_PIP" = "1" ]; then
+    "$PYTHON" -m pip install --disable-pip-version-check --upgrade pip
+  fi
+  "$PYTHON" -m pip install --disable-pip-version-check -r "$REQUIREMENTS_FILE"
 
   mkdir -p "$TTD_MODEL_DIR"
 
@@ -855,10 +857,25 @@ prepare_runtime_environment() {
 }
 
 build_frontend_release() {
-  (
+  ensure_port_available "frontend" "$FRONTEND_PID_FILE" "$STALE_NEXT_PORT"
+  rm -f "$FRONTEND_PID_FILE"
+  rm -rf "${FRONTEND_DIR}/.next" "$TTD_FRONTEND_BUILD_ROOT"
+
+  echo "Building static frontend export..."
+  if ! (
     cd "$FRONTEND_DIR"
-    npm run build
-  )
+    npm run build >"$FRONTEND_LOG_FILE" 2>&1
+  ); then
+    echo "Frontend build failed. Last log lines:"
+    tail -n 120 "$FRONTEND_LOG_FILE" 2>/dev/null || true
+    exit 1
+  fi
+
+  if [ ! -f "${TTD_FRONTEND_BUILD_ROOT}/index.html" ]; then
+    echo "Frontend export is missing index.html in ${TTD_FRONTEND_BUILD_ROOT}"
+    tail -n 120 "$FRONTEND_LOG_FILE" 2>/dev/null || true
+    exit 1
+  fi
 }
 
 start_stack_detached() {
@@ -871,31 +888,23 @@ start_stack_detached() {
     spawn_detached "llama.cpp" "$LLAMA_PID_FILE" "$LLAMA_LOG_FILE" "$ROOT_DIR" "$LLAMA_CPP_BIN" "${LLAMA_ARGS[@]}"
   fi
 
+  stop_from_pid_file "backend" "$BACKEND_PID_FILE"
   ensure_port_available "backend" "$BACKEND_PID_FILE" "$BACKEND_PORT"
   spawn_detached "backend" "$BACKEND_PID_FILE" "$BACKEND_LOG_FILE" "$ROOT_DIR" \
     "$PYTHON" "$MANAGE_PY" runserver "${BACKEND_HOST}:${BACKEND_PORT}" --noreload
 
-  ensure_port_available "frontend" "$FRONTEND_PID_FILE" "$FRONTEND_PORT"
-  spawn_detached "frontend" "$FRONTEND_PID_FILE" "$FRONTEND_LOG_FILE" "$FRONTEND_DIR" \
-    "$NEXT_BIN" start -H "$FRONTEND_HOST" -p "$FRONTEND_PORT"
-
   echo "Site:              ${TTD_FRONTEND_ORIGIN}"
   echo "Admin:             ${TTD_FRONTEND_ORIGIN}/admin-panel"
   echo "Backend API:       ${TTD_FRONTEND_ORIGIN}/api"
-  echo "Frontend internal: ${TTD_FRONTEND_INTERNAL_URL}"
+  echo "Frontend export:   ${TTD_FRONTEND_BUILD_ROOT}"
   echo "Logs:        ${LOG_DIR}"
 }
 
 start_stack_foreground() {
   prepare_runtime_environment "$@"
+  build_frontend_release
 
   cleanup() {
-    if [ -n "${BACKEND_PID:-}" ]; then
-      kill "$BACKEND_PID" >/dev/null 2>&1 || true
-    fi
-    if [ -n "${FRONTEND_PID:-}" ]; then
-      kill "$FRONTEND_PID" >/dev/null 2>&1 || true
-    fi
     if [ -n "${LLAMA_PID:-}" ]; then
       kill "$LLAMA_PID" >/dev/null 2>&1 || true
     fi
@@ -909,22 +918,14 @@ start_stack_foreground() {
     echo "llama.cpp: ${TTD_LLAMA_CPP_URL}"
   fi
 
+  stop_from_pid_file "backend" "$BACKEND_PID_FILE"
   ensure_port_available "backend" "$BACKEND_PID_FILE" "$BACKEND_PORT"
-  "$PYTHON" "$MANAGE_PY" runserver "${BACKEND_HOST}:${BACKEND_PORT}" &
-  BACKEND_PID=$!
-
   echo "Site:              ${TTD_FRONTEND_ORIGIN}"
   echo "Admin:             ${TTD_FRONTEND_ORIGIN}/admin-panel"
   echo "Backend API:       ${TTD_FRONTEND_ORIGIN}/api"
-  echo "Frontend internal: ${TTD_FRONTEND_INTERNAL_URL}"
+  echo "Frontend export:   ${TTD_FRONTEND_BUILD_ROOT}"
 
-  (
-    cd "$FRONTEND_DIR"
-    ensure_port_available "frontend" "$FRONTEND_PID_FILE" "$FRONTEND_PORT"
-    "$NEXT_BIN" dev -H "$FRONTEND_HOST" -p "$FRONTEND_PORT"
-  ) &
-  FRONTEND_PID=$!
-  wait "$FRONTEND_PID"
+  exec "$PYTHON" "$MANAGE_PY" runserver "${BACKEND_HOST}:${BACKEND_PORT}"
 }
 
 stop_stack() {
@@ -933,8 +934,17 @@ stop_stack() {
   stop_from_pid_file "llama.cpp" "$LLAMA_PID_FILE"
 }
 
+print_frontend_status() {
+  if [ -f "${TTD_FRONTEND_BUILD_ROOT:-${FRONTEND_DIR}/out}/index.html" ]; then
+    echo "frontend: exported (${TTD_FRONTEND_BUILD_ROOT:-${FRONTEND_DIR}/out})"
+  else
+    echo "frontend: export missing"
+  fi
+}
+
 show_status() {
-  print_process_status "frontend" "$FRONTEND_PID_FILE"
+  resolve_repo_layout
+  print_frontend_status
   print_process_status "backend" "$BACKEND_PID_FILE"
   print_process_status "llama.cpp" "$LLAMA_PID_FILE"
 }

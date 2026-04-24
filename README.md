@@ -27,16 +27,16 @@ This is the Linux branch. It contains the shared Django/Next.js code and the Lin
 - `backend/models/` — local GGUF models; ignored by git.
 - `backend/media/` — generated files/images; ignored by git.
 - `frontend/` — Next.js app, source, assets, and config files.
-- `linux.sh` — Linux launcher that starts llama.cpp, Django, and Next.js.
+- `linux.sh` — Linux launcher that builds the TypeScript frontend, starts llama.cpp, and serves everything through Django.
 
 ## Launch
 
-By default the launcher starts `llama-server`, Django, and Next.js in detached mode so they survive SSH logout. Put a GGUF model into `backend/models` or set `LLAMA_CPP_MODEL_PATH`.
+By default the launcher builds the Next.js/TypeScript frontend into `frontend/out`, then starts `llama-server` and Django in detached mode so they survive SSH logout. Put a GGUF model into `backend/models` or set `LLAMA_CPP_MODEL_PATH`.
 Before startup it also tries to fast-forward the current git branch from `origin` automatically. If the repo has local changes, auto-update is skipped.
 If `node`/`npm` is missing on Linux, `./linux.sh` downloads a local runtime into `.runtime/node` automatically.
 The launcher also auto-discovers `manage.py`, `requirements.txt`, the frontend folder, `llama-server`, and nearby `.gguf` models in common project/system locations.
 If `llama-server` is missing, the launcher can clone and build `ggml-org/llama.cpp` automatically into `.runtime/llama.cpp` when git/build tools are available.
-By default Django binds to `0.0.0.0:8000`, while Next.js runs internally on `127.0.0.1:4028` and is exposed through Django as a reverse-proxied site on `:8000`. Public URLs are derived from the server IP unless you override `PUBLIC_HOST` or `BACKEND_PUBLIC_HOST`.
+By default Django binds to `0.0.0.0:8000` and serves both the API and the exported frontend. There is no public or internal Next.js runtime server in the normal launcher path. Public URLs are derived from the server IP unless you override `PUBLIC_HOST` or `BACKEND_PUBLIC_HOST`.
 
 ```bash
 ./linux.sh
@@ -71,7 +71,7 @@ The launcher starts:
 - Site: `http://127.0.0.1:8000`
 - Backend API: `http://127.0.0.1:8000/api`
 - Admin panel: `http://127.0.0.1:8000/admin-panel`
-- Internal Next.js process: `http://127.0.0.1:4028`
+- Frontend files: `frontend/out`
 
 ## Manual Backend
 
@@ -85,12 +85,12 @@ python manage.py shell -c "from core.seed import ensure_defaults; ensure_default
 python manage.py runserver 0.0.0.0:8000
 ```
 
-## Manual Frontend
+## Manual Frontend Build
 
 ```bash
 cd frontend
 npm install
-NEXT_PUBLIC_API_BASE=/api npm run dev -- -H 127.0.0.1 -p 4028
+NEXT_PUBLIC_API_BASE=/api npm run build
 ```
 
 ## MySQL

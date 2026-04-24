@@ -89,11 +89,11 @@ USE_TZ = True
 STATIC_URL = "static/"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = Path(os.environ.get("TTD_MEDIA_ROOT", BACKEND_DIR / "media"))
+TTD_FRONTEND_BUILD_ROOT = Path(os.environ.get("TTD_FRONTEND_BUILD_ROOT", PROJECT_ROOT / "frontend" / "out"))
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 TTD_FRONTEND_ORIGIN = os.environ.get("TTD_FRONTEND_ORIGIN", "http://127.0.0.1:8000")
-TTD_FRONTEND_INTERNAL_URL = os.environ.get("TTD_FRONTEND_INTERNAL_URL", "http://127.0.0.1:4028")
 TTD_MODEL_BACKEND = os.environ.get("TTD_MODEL_BACKEND", "mock").lower()
 TTD_LLAMA_CPP_URL = os.environ.get("TTD_LLAMA_CPP_URL", "http://127.0.0.1:8080")
 TTD_LLAMA_CPP_N_PREDICT = int(os.environ.get("TTD_LLAMA_CPP_N_PREDICT", "1024"))

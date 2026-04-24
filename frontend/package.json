@@ -39,13 +39,13 @@
     "warning": "🚨 CRITICAL: DO NOT REMOVE OR MODIFY ABOVE DEPENDENCIES - Required for Next.js 15 TypeScript app functionality"
   },
   "scripts": {
-    "dev": "next dev -p 4028",
+    "dev": "next dev",
     "build": "next build",
-    "start": "next start -p 4028",
+    "start": "next build",
     "lint": "next lint",
     "lint:fix": "next lint --fix",
     "format": "prettier --write \"src/**/*.{ts,tsx,css,md,json}\"",
-    "serve": "next start -p 4028",
+    "serve": "next build",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {

@@ -1,5 +1,5 @@
-import { redirect } from 'next/navigation';
+import WelcomeClient from './welcome-screen/components/WelcomeClient';
 
 export default function RootPage() {
-  redirect('/welcome-screen');
+  return <WelcomeClient />;
 }

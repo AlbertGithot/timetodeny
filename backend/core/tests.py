@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from email.message import Message
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 from django.test import Client, TestCase, override_settings
@@ -24,31 +25,25 @@ class FakeLlamaResponse:
         yield b'data: {"content":"","stop":true}\n\n'
 
 
-class FakeFrontendResponse:
-    def __init__(self, body: bytes, status: int = 200, content_type: str = "text/html; charset=utf-8") -> None:
-        self._body = body
-        self.status = status
-        self.headers = Message()
-        self.headers["Content-Type"] = content_type
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        return None
-
-    def read(self) -> bytes:
-        return self._body
-
-    def getcode(self) -> int:
-        return self.status
-
-
 @override_settings(ALLOWED_HOSTS=["testserver", "127.0.0.1", "localhost"])
 class ApiSmokeTests(TestCase):
     def setUp(self) -> None:
         ensure_defaults()
+        self.frontend_build_dir = tempfile.TemporaryDirectory()
+        build_root = Path(self.frontend_build_dir.name)
+        (build_root / "admin-panel").mkdir(parents=True, exist_ok=True)
+        (build_root / "_next" / "static").mkdir(parents=True, exist_ok=True)
+        (build_root / "index.html").write_text("<html><body>chat ui</body></html>", encoding="utf-8")
+        (build_root / "admin-panel" / "index.html").write_text("panel", encoding="utf-8")
+        (build_root / "404.html").write_text("missing", encoding="utf-8")
+        (build_root / "_next" / "static" / "app.js").write_text("console.log('ok')", encoding="utf-8")
+        self.settings_override = override_settings(TTD_FRONTEND_BUILD_ROOT=build_root)
+        self.settings_override.enable()
         self.client = Client()
+
+    def tearDown(self) -> None:
+        self.settings_override.disable()
+        self.frontend_build_dir.cleanup()
 
     def test_chat_stream_creates_file_and_request_log(self) -> None:
         response = self.client.post(
@@ -79,17 +74,20 @@ class ApiSmokeTests(TestCase):
         self.assertEqual(allowed.status_code, 200)
         self.assertTrue(allowed.json()["ok"])
 
-    @patch("urllib.request.urlopen", return_value=FakeFrontendResponse(b"<html><body>chat ui</body></html>"))
-    def test_root_proxies_frontend(self, _urlopen) -> None:
+    def test_root_serves_exported_frontend(self) -> None:
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "chat ui")
 
-    @patch("urllib.request.urlopen", return_value=FakeFrontendResponse(b"panel", content_type="text/plain"))
-    def test_non_api_route_proxies_frontend(self, _urlopen) -> None:
+    def test_non_api_route_serves_exported_frontend(self) -> None:
         response = self.client.get("/admin-panel")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.content, b"panel")
+        self.assertContains(response, "panel")
+
+    def test_exported_static_asset_is_served(self) -> None:
+        response = self.client.get("/_next/static/app.js")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("javascript", response["Content-Type"])
 
     def test_api_index_explains_backend(self) -> None:
         response = self.client.get("/api")

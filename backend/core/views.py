@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import csv
+import mimetypes
 import time
 from io import StringIO
-import urllib.error
-import urllib.request
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 from uuid import UUID
 
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.db.models import Count
-from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
+from django.http import FileResponse, HttpRequest, HttpResponse, StreamingHttpResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
@@ -37,66 +37,17 @@ from .services import (
 )
 from .utils import client_ip, json_response, log_admin_action, make_token, parse_json, require_admin, sse, user_agent
 
-PROXY_REQUEST_HEADERS = (
-    "Accept",
-    "Accept-Encoding",
-    "Accept-Language",
-    "Cache-Control",
-    "Content-Type",
-    "Cookie",
-    "If-Match",
-    "If-Modified-Since",
-    "If-None-Match",
-    "Pragma",
-    "Range",
-    "Referer",
-    "Sec-CH-UA",
-    "Sec-CH-UA-Mobile",
-    "Sec-CH-UA-Platform",
-    "Sec-Fetch-Dest",
-    "Sec-Fetch-Mode",
-    "Sec-Fetch-Site",
-    "Sec-Fetch-User",
-    "Upgrade-Insecure-Requests",
-    "User-Agent",
-)
-HOP_BY_HOP_RESPONSE_HEADERS = {
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailers",
-    "transfer-encoding",
-    "upgrade",
-}
-
 
 def index(request: HttpRequest):
-    return frontend_proxy(request)
+    return frontend_entry(request)
 
 
-def frontend_proxy(request: HttpRequest, proxy_path: str = ""):
-    target_url = _frontend_target_url(request)
-    body = request.body if request.method not in {"GET", "HEAD"} else None
-    upstream_request = urllib.request.Request(target_url, data=body or None, method=request.method)
-
-    for header_name in PROXY_REQUEST_HEADERS:
-        header_value = request.headers.get(header_name)
-        if header_value:
-            upstream_request.add_header(header_name, header_value)
-
-    upstream_request.add_header("X-Forwarded-For", client_ip(request))
-    upstream_request.add_header("X-Forwarded-Proto", request.scheme)
-    upstream_request.add_header("X-Forwarded-Host", request.get_host())
-
-    try:
-        with urllib.request.urlopen(upstream_request, timeout=settings.TTD_REQUEST_TIMEOUT_SECONDS) as upstream:
-            return _frontend_proxy_response(upstream)
-    except urllib.error.HTTPError as exc:
-        return _frontend_proxy_response(exc)
-    except urllib.error.URLError as exc:
-        return _frontend_unavailable_response(request, exc)
+def frontend_entry(request: HttpRequest, asset_path: str = ""):
+    file_path = _resolve_frontend_file(request.path_info or "/")
+    if file_path:
+        status = 404 if file_path.name == "404.html" and request.path_info.rstrip("/") not in {"", "/404"} else 200
+        return _serve_frontend_file(file_path, status=status)
+    return _frontend_unavailable_response(request, status=404)
 
 
 def _public_frontend_origin(request: HttpRequest) -> str:
@@ -115,35 +66,74 @@ def _public_frontend_origin(request: HttpRequest) -> str:
     return configured
 
 
-def _frontend_target_url(request: HttpRequest) -> str:
-    full_path = request.get_full_path()
-    if not full_path.startswith("/"):
-        full_path = f"/{full_path}"
-    return f"{settings.TTD_FRONTEND_INTERNAL_URL.rstrip('/')}{full_path}"
+def _frontend_build_root() -> Path:
+    return settings.TTD_FRONTEND_BUILD_ROOT.resolve()
 
 
-def _frontend_proxy_response(upstream) -> HttpResponse:
-    response = HttpResponse(content=upstream.read(), status=getattr(upstream, "status", upstream.getcode()))
-    for header_name, header_value in upstream.headers.items():
-        if header_name.lower() in HOP_BY_HOP_RESPONSE_HEADERS:
-            continue
-        response[header_name] = header_value
+def _resolve_frontend_file(request_path: str) -> Path | None:
+    build_root = _frontend_build_root()
+    if not build_root.exists():
+        return None
+
+    normalized = (request_path or "/").split("?", 1)[0]
+    normalized = normalized.lstrip("/")
+    candidates: list[str] = []
+
+    if not normalized:
+        candidates.append("index.html")
+    else:
+        relative = PurePosixPath(normalized)
+        if ".." in relative.parts:
+            return None
+
+        if relative.suffix:
+            candidates.append(relative.as_posix())
+        else:
+            candidates.append(f"{relative.as_posix()}/index.html")
+            candidates.append(f"{relative.as_posix()}.html")
+
+    for candidate in candidates:
+        resolved = _safe_frontend_path(build_root, candidate)
+        if resolved and resolved.is_file():
+            return resolved
+
+    fallback_404 = _safe_frontend_path(build_root, "404.html")
+    if fallback_404 and fallback_404.is_file():
+        return fallback_404
+
+    return None
+
+
+def _safe_frontend_path(build_root: Path, relative_path: str) -> Path | None:
+    relative = PurePosixPath(relative_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        return None
+
+    resolved = (build_root / Path(*relative.parts)).resolve()
+    if resolved != build_root and build_root not in resolved.parents:
+        return None
+    return resolved
+
+
+def _serve_frontend_file(file_path: Path, status: int = 200) -> FileResponse:
+    content_type, encoding = mimetypes.guess_type(file_path.name)
+    response = FileResponse(open(file_path, "rb"), content_type=content_type or "application/octet-stream")
+    response.status_code = status
+    if encoding:
+        response["Content-Encoding"] = encoding
+
+    if file_path.suffix == ".html":
+        response["Cache-Control"] = "no-cache"
+    elif file_path.suffix in {".js", ".css"} or "_next" in file_path.parts:
+        response["Cache-Control"] = "public, max-age=31536000, immutable"
+    else:
+        response["Cache-Control"] = "public, max-age=3600"
     return response
 
 
-def _frontend_unavailable_response(request: HttpRequest, exc: urllib.error.URLError) -> HttpResponse:
-    error_text = str(getattr(exc, "reason", exc))
+def _frontend_unavailable_response(request: HttpRequest, status: int = 503) -> HttpResponse:
     public_frontend_origin = _public_frontend_origin(request)
-    if "text/html" not in request.headers.get("Accept", "") and request.path.startswith("/api"):
-        return json_response(
-            {
-                "ok": False,
-                "error": "Frontend is not reachable",
-                "frontendInternalUrl": settings.TTD_FRONTEND_INTERNAL_URL,
-                "detail": error_text,
-            },
-            status=502,
-        )
+    build_root = _frontend_build_root()
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -162,15 +152,15 @@ def _frontend_unavailable_response(request: HttpRequest, exc: urllib.error.URLEr
   </head>
   <body>
     <main>
-      <h1>Frontend is not running</h1>
-      <p>Django is reachable on <code>{public_frontend_origin}</code>, but the internal Next.js process at <code>{settings.TTD_FRONTEND_INTERNAL_URL}</code> did not answer.</p>
-      <p>Start the stack with <code>./linux.sh start</code> and then check <code>./linux.sh logs</code> if it still acts like a genius.</p>
+      <h1>Frontend build is unavailable</h1>
+      <p>Django is reachable on <code>{public_frontend_origin}</code>, but the exported frontend files were not found under <code>{build_root}</code>.</p>
+      <p>Run <code>./linux.sh start</code> or <code>npm run build</code> in <code>frontend/</code> and then try again.</p>
       <p>API health stays available at <a href="/api/health">/api/health</a>.</p>
-      <p>Proxy error: <code>{error_text}</code></p>
+      <p>Requested path: <code>{request.path}</code></p>
     </main>
   </body>
 </html>"""
-    return HttpResponse(html, status=502)
+    return HttpResponse(html, status=status)
 
 
 def api_index(request: HttpRequest):
@@ -181,7 +171,7 @@ def api_index(request: HttpRequest):
             "service": "timetodeny-backend",
             "frontend": public_frontend_origin,
             "health": "/api/health",
-            "note": "The chat UI is served on / through Django proxying to the internal Next.js process.",
+            "note": "The chat UI is served directly by Django from the exported Next.js build.",
         }
     )
 
