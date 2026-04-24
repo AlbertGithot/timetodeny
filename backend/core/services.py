@@ -315,35 +315,59 @@ def chunk_text(text: str, size: int = 16) -> Iterable[str]:
         yield text[idx : idx + size]
 
 
-def llama_cpp_prompt(prompt: str, mode: str, model_name: str, system_prompt: str = "") -> str:
+def llama_cpp_system_prompt(mode: str, system_prompt: str = "") -> str:
     system = system_prompt.strip() or (
         "You are Time To Deny, a local AI assistant powered by llama.cpp. "
-        "Answer clearly, stream useful output, and prefer runnable code when asked."
+        "Answer clearly, stream useful output, and prefer runnable code when asked. "
+        "Always answer in the same language as the user's latest message. "
+        "If the user writes in Russian, answer in Russian. "
+        "Never switch to Indonesian, Malay, Turkish, or another unrelated language unless the user asks for it."
     )
     if mode == "expert":
         system += "\nUse careful reasoning internally, then provide a direct final answer."
     else:
         system += "\nAnswer directly and keep latency low."
-    return (
-        "<|system|>\n"
-        f"{system}\n"
-        "<|user|>\n"
-        f"{prompt.strip()}\n"
-        "<|assistant|>\n"
-    )
+    return system
+
+
+def token_from_llamacpp_chunk(item: dict) -> str:
+    choices = item.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        delta = first.get("delta")
+        if isinstance(delta, dict):
+            return str(delta.get("content") or "")
+        message = first.get("message")
+        if isinstance(message, dict):
+            return str(message.get("content") or "")
+        return str(first.get("text") or "")
+    return str(item.get("content") or item.get("response") or "")
+
+
+def is_llamacpp_done(item: dict) -> bool:
+    if item.get("stop") or item.get("done"):
+        return True
+    choices = item.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        return bool(first.get("finish_reason"))
+    return False
 
 
 def stream_llamacpp(prompt: str, mode: str, model_name: str, system_prompt: str = "") -> Iterable[str]:
     payload = {
-        "prompt": llama_cpp_prompt(prompt, mode, model_name, system_prompt),
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": llama_cpp_system_prompt(mode, system_prompt)},
+            {"role": "user", "content": prompt.strip()},
+        ],
         "stream": True,
-        "temperature": 0.2 if mode == "expert" else 0.5,
-        "n_predict": settings.TTD_LLAMA_CPP_N_PREDICT,
-        "cache_prompt": True,
-        "stop": ["<|user|>", "<|system|>", "</s>"],
+        "temperature": 0.15 if mode == "expert" else 0.25,
+        "top_p": 0.9,
+        "max_tokens": settings.TTD_LLAMA_CPP_N_PREDICT,
     }
     req = urllib.request.Request(
-        f"{settings.TTD_LLAMA_CPP_URL.rstrip('/')}/completion",
+        f"{settings.TTD_LLAMA_CPP_URL.rstrip('/')}/v1/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -361,10 +385,10 @@ def stream_llamacpp(prompt: str, mode: str, model_name: str, system_prompt: str 
                 if line == "[DONE]":
                     break
                 item = json.loads(line)
-                token = item.get("content") or item.get("response") or ""
+                token = token_from_llamacpp_chunk(item)
                 if token:
                     yield token
-                if item.get("stop") or item.get("done"):
+                if is_llamacpp_done(item):
                     break
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise RuntimeError(

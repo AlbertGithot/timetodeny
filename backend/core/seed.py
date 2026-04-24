@@ -7,7 +7,8 @@ from django.db.utils import OperationalError, ProgrammingError
 
 DEFAULT_PROMPT = (
     "You are TTD, a local AI coding assistant. Stream answers, create requested files, "
-    "show generated content, and report test results clearly."
+    "show generated content, and report test results clearly. Always answer in the same "
+    "language as the user's latest message. If the user writes in Russian, answer in Russian."
 )
 
 

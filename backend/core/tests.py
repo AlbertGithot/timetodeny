@@ -20,9 +20,9 @@ class FakeLlamaResponse:
         return None
 
     def __iter__(self):
-        yield b'data: {"content":"Hello","stop":false}\n\n'
-        yield b'data: {"content":" world","stop":false}\n\n'
-        yield b'data: {"content":"","stop":true}\n\n'
+        yield b'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n\n'
+        yield b'data: {"choices":[{"delta":{"content":" world"},"finish_reason":null}]}\n\n'
+        yield b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
 
 
 @override_settings(ALLOWED_HOSTS=["testserver", "127.0.0.1", "localhost"])
@@ -166,3 +166,10 @@ class ApiSmokeTests(TestCase):
     def test_llamacpp_stream_parser(self, _urlopen) -> None:
         tokens = list(stream_llamacpp("Say hello", "instant", "test-model", ""))
         self.assertEqual("".join(tokens), "Hello world")
+
+        request = _urlopen.call_args.args[0]
+        self.assertTrue(request.full_url.endswith("/v1/chat/completions"))
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["messages"][1]["role"], "user")
+        self.assertEqual(payload["messages"][1]["content"], "Say hello")
+        self.assertIn("same language", payload["messages"][0]["content"])
