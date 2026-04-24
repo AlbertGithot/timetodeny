@@ -19,7 +19,7 @@ This is the Linux branch. It contains the shared Django/Next.js code and the Lin
 
 ## Project Layout
 
-- `backend/manage.py` — Django entrypoint.
+- `manage.py` — Django entrypoint from the repository root.
 - `backend/timetodeny/` — Django project settings, URLs, ASGI/WSGI.
 - `backend/core/` — app models, API views, serializers, llama.cpp service, tests.
 - `backend/requirements.txt` — Python dependencies.
@@ -49,9 +49,9 @@ The launcher starts:
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r backend/requirements.txt
-python backend/manage.py migrate
-python backend/manage.py shell -c "from core.seed import ensure_defaults; ensure_defaults()"
-python backend/manage.py runserver 127.0.0.1:8000
+python manage.py migrate
+python manage.py shell -c "from core.seed import ensure_defaults; ensure_defaults()"
+python manage.py runserver 127.0.0.1:8000
 ```
 
 ## Manual Frontend
