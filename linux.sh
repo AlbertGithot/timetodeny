@@ -12,7 +12,9 @@ REQUIREMENTS_FILE=""
 RUNTIME_DIR="${ROOT_DIR}/.runtime"
 NODE_RUNTIME_DIR="${RUNTIME_DIR}/node"
 NODE_DIST_DIR="${RUNTIME_DIR}/node-dist"
-LLAMA_CPP_RUNTIME_DIR="${RUNTIME_DIR}/llama.cpp"
+MODELS_DIR="${TTD_PROJECT_MODELS_DIR:-${ROOT_DIR}/models}"
+LLAMA_SERVER_DIR="${TTD_LLAMA_SERVER_DIR:-${ROOT_DIR}/llamaserver}"
+LLAMA_CPP_RUNTIME_DIR="${LLAMA_CPP_SOURCE_DIR:-${LLAMA_SERVER_DIR}/llama.cpp}"
 STATE_DIR="${RUNTIME_DIR}/state"
 PID_DIR="${STATE_DIR}/pids"
 LOG_DIR="${RUNTIME_DIR}/logs"
@@ -142,7 +144,7 @@ first_executable_path() {
 find_repo_file() {
   local name="$1"
   find "$ROOT_DIR" \
-    \( -path "*/.git" -o -path "*/node_modules" -o -path "*/.venv" -o -path "*/.next" -o -path "*/.runtime" \) -prune \
+    \( -path "*/.git" -o -path "*/node_modules" -o -path "*/.venv" -o -path "*/.next" -o -path "*/.runtime" -o -path "*/models" -o -path "*/llamaserver" \) -prune \
     -o -type f -name "$name" -print -quit 2>/dev/null
 }
 
@@ -175,7 +177,7 @@ cpu_jobs() {
 }
 
 ensure_runtime_dirs() {
-  mkdir -p "$RUNTIME_DIR" "$STATE_DIR" "$PID_DIR" "$LOG_DIR"
+  mkdir -p "$RUNTIME_DIR" "$STATE_DIR" "$PID_DIR" "$LOG_DIR" "$MODELS_DIR" "$LLAMA_SERVER_DIR"
 }
 
 read_pid_file() {
@@ -490,18 +492,11 @@ resolve_repo_layout() {
 
   model_dir_override="${TTD_MODEL_DIR:-}"
   if [ -n "$model_dir_override" ]; then
+    mkdir -p "$model_dir_override"
     export TTD_MODEL_DIR="$model_dir_override"
   else
-    export TTD_MODEL_DIR="$(
-      first_existing_dir \
-        "${ROOT_DIR}/backend/models" \
-        "${ROOT_DIR}/models" \
-        "${BACKEND_DIR}/models" \
-        || true
-    )"
-    if [ -z "${TTD_MODEL_DIR:-}" ]; then
-      export TTD_MODEL_DIR="${BACKEND_DIR}/models"
-    fi
+    mkdir -p "$MODELS_DIR"
+    export TTD_MODEL_DIR="$MODELS_DIR"
   fi
 }
 
@@ -525,6 +520,15 @@ resolve_llama_cpp_bin() {
         "${LLAMA_CPP_RUNTIME_DIR}/build/bin/llama-server" \
         "${LLAMA_CPP_RUNTIME_DIR}/llama-server" \
         "${LLAMA_CPP_RUNTIME_DIR}/bin/llama-server" \
+        "${LLAMA_SERVER_DIR}/llama-server" \
+        "${LLAMA_SERVER_DIR}/bin/llama-server" \
+        "${LLAMA_SERVER_DIR}/build/bin/llama-server" \
+        "${LLAMA_SERVER_DIR}/llama.cpp/llama-server" \
+        "${LLAMA_SERVER_DIR}/llama.cpp/bin/llama-server" \
+        "${LLAMA_SERVER_DIR}/llama.cpp/build/bin/llama-server" \
+        "${RUNTIME_DIR}/llama.cpp/build/bin/llama-server" \
+        "${RUNTIME_DIR}/llama.cpp/llama-server" \
+        "${RUNTIME_DIR}/llama.cpp/bin/llama-server" \
         "${ROOT_DIR}/llama-server" \
         "${ROOT_DIR}/bin/llama-server" \
         "${ROOT_DIR}/build/bin/llama-server" \
@@ -545,6 +549,9 @@ resolve_llama_cpp_bin() {
   fi
   if [ -z "$candidate" ]; then
     candidate="$(find_executable_under "$LLAMA_CPP_RUNTIME_DIR" "llama-server" 6 || true)"
+  fi
+  if [ -z "$candidate" ]; then
+    candidate="$(find_executable_under "$LLAMA_SERVER_DIR" "llama-server" 6 || true)"
   fi
   if [ -z "$candidate" ]; then
     candidate="$(find_executable_under "$ROOT_DIR" "llama-server" 6 || true)"
@@ -594,11 +601,11 @@ bootstrap_llama_cpp() {
     return 1
   fi
 
-  repo_dir="${LLAMA_CPP_SOURCE_DIR:-$LLAMA_CPP_RUNTIME_DIR}"
+  repo_dir="$LLAMA_CPP_RUNTIME_DIR"
   build_dir="${repo_dir}/build"
   jobs="${LLAMA_CPP_BUILD_JOBS:-$(cpu_jobs)}"
 
-  mkdir -p "$RUNTIME_DIR"
+  mkdir -p "$LLAMA_SERVER_DIR"
 
   if [ ! -d "${repo_dir}/.git" ]; then
     echo "Bootstrapping llama.cpp from ${LLAMA_CPP_REPO_URL}..."
@@ -662,6 +669,9 @@ resolve_llama_model_path() {
     candidate="$(find_file_under "${ROOT_DIR}/models" "*.gguf" 5 || true)"
   fi
   if [ -z "$candidate" ]; then
+    candidate="$(find_file_under "${LLAMA_SERVER_DIR}/models" "*.gguf" 5 || true)"
+  fi
+  if [ -z "$candidate" ]; then
     candidate="$(find_file_under "${BACKEND_DIR}/models" "*.gguf" 5 || true)"
   fi
   if [ -z "$candidate" ]; then
@@ -678,6 +688,9 @@ resolve_llama_model_path() {
   fi
   if [ -z "$candidate" ]; then
     candidate="$(find_file_under "${LLAMA_CPP_RUNTIME_DIR}/models" "*.gguf" 6 || true)"
+  fi
+  if [ -z "$candidate" ]; then
+    candidate="$(find_file_under "${RUNTIME_DIR}/llama.cpp/models" "*.gguf" 6 || true)"
   fi
 
   if [ -n "${LLAMA_CPP_BIN:-}" ]; then
@@ -803,7 +816,7 @@ prepare_runtime_environment() {
   fi
   "$PYTHON" -m pip install --disable-pip-version-check -r "$REQUIREMENTS_FILE"
 
-  mkdir -p "$TTD_MODEL_DIR"
+  mkdir -p "$TTD_MODEL_DIR" "$LLAMA_SERVER_DIR"
 
   if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
     (
@@ -824,13 +837,13 @@ prepare_runtime_environment() {
   if [ "$TTD_MODEL_BACKEND" = "llamacpp" ]; then
     LLAMA_CPP_BIN="${LLAMA_CPP_BIN:-}"
     if ! resolve_llama_cpp_bin && ! bootstrap_llama_cpp && ! resolve_llama_cpp_bin; then
-      echo "llama-server not found. Searched PATH, repo directories, \$HOME/llama.cpp, \$HOME/.local/bin, /usr/local, and /opt."
+      echo "llama-server not found. Searched PATH, ${LLAMA_SERVER_DIR}, repo directories, \$HOME/llama.cpp, \$HOME/.local/bin, /usr/local, and /opt."
       echo "Auto-bootstrap also failed. Install build tools (git, cmake or make, and a C++ compiler) or set LLAMA_CPP_BIN manually."
       exit 1
     fi
     if ! resolve_llama_model_path; then
       echo "No GGUF model found."
-      echo "Searched model directories around the repo, ${TTD_MODEL_DIR}, \$HOME/models, \$HOME/project, and llama.cpp model folders."
+      echo "Searched model directories around the repo, ${TTD_MODEL_DIR}, ${LLAMA_SERVER_DIR}/models, \$HOME/models, \$HOME/project, and llama.cpp model folders."
       echo "Put a .gguf file into: $TTD_MODEL_DIR"
       echo "Or set LLAMA_CPP_MODEL_PATH=/full/path/model.gguf"
       echo "For UI-only dev without llama.cpp: TTD_MODEL_BACKEND=mock ./linux.sh"
@@ -897,7 +910,9 @@ start_stack_detached() {
   echo "Admin:             ${TTD_FRONTEND_ORIGIN}/admin-panel"
   echo "Backend API:       ${TTD_FRONTEND_ORIGIN}/api"
   echo "Frontend export:   ${TTD_FRONTEND_BUILD_ROOT}"
-  echo "Logs:        ${LOG_DIR}"
+  echo "Models:            ${TTD_MODEL_DIR}"
+  echo "llama.cpp source:  ${LLAMA_CPP_RUNTIME_DIR}"
+  echo "Logs:              ${LOG_DIR}"
 }
 
 start_stack_foreground() {
@@ -924,6 +939,8 @@ start_stack_foreground() {
   echo "Admin:             ${TTD_FRONTEND_ORIGIN}/admin-panel"
   echo "Backend API:       ${TTD_FRONTEND_ORIGIN}/api"
   echo "Frontend export:   ${TTD_FRONTEND_BUILD_ROOT}"
+  echo "Models:            ${TTD_MODEL_DIR}"
+  echo "llama.cpp source:  ${LLAMA_CPP_RUNTIME_DIR}"
 
   exec "$PYTHON" "$MANAGE_PY" runserver "${BACKEND_HOST}:${BACKEND_PORT}"
 }
@@ -945,6 +962,8 @@ print_frontend_status() {
 show_status() {
   resolve_repo_layout
   print_frontend_status
+  echo "models: ${TTD_MODEL_DIR}"
+  echo "llamaserver: ${LLAMA_CPP_RUNTIME_DIR}"
   print_process_status "backend" "$BACKEND_PID_FILE"
   print_process_status "llama.cpp" "$LLAMA_PID_FILE"
 }

@@ -18,24 +18,44 @@ Next.js chat UI with a Django/Python backend for local AI workflows.
 
 This is the Linux branch. It contains the shared Django/Next.js code and the Linux launcher only.
 
+## Recommended Server Path
+
+For a real Linux server, keep the project in `/opt/timetodeny`. `/root/project/linux/timetodeny` also works, but `/opt/timetodeny` is cleaner for a long-running service.
+
+```bash
+cd /opt
+git clone --branch linux --single-branch https://github.com/AlbertGithot/timetodeny.git timetodeny
+cd /opt/timetodeny
+mkdir -p models llamaserver
+```
+
+If the project is already cloned, just run:
+
+```bash
+mkdir -p models llamaserver
+```
+
+The launcher also creates these folders automatically.
+
 ## Project Layout
 
 - `manage.py` — Django entrypoint from the repository root.
 - `backend/timetodeny/` — Django project settings, URLs, ASGI/WSGI.
 - `backend/core/` — app models, API views, serializers, llama.cpp service, tests.
 - `requirements.txt` — Python dependencies.
-- `backend/models/` — local GGUF models; ignored by git.
+- `models/` — local GGUF models; ignored by git.
+- `llamaserver/` — local llama.cpp source/build folder; ignored by git.
 - `backend/media/` — generated files/images; ignored by git.
 - `frontend/` — Next.js app, source, assets, and config files.
 - `linux.sh` — Linux launcher that builds the TypeScript frontend, starts llama.cpp, and serves everything through Django.
 
 ## Launch
 
-By default the launcher builds the Next.js/TypeScript frontend into `frontend/out`, then starts `llama-server` and Django in detached mode so they survive SSH logout. Put a GGUF model into `backend/models` or set `LLAMA_CPP_MODEL_PATH`.
+By default the launcher builds the Next.js/TypeScript frontend into `frontend/out`, then starts `llama-server` and Django in detached mode so they survive SSH logout. Put a GGUF model into `models/` or set `LLAMA_CPP_MODEL_PATH`.
 Before startup it also tries to fast-forward the current git branch from `origin` automatically. If the repo has local changes, auto-update is skipped.
 If `node`/`npm` is missing on Linux, `./linux.sh` downloads a local runtime into `.runtime/node` automatically.
-The launcher also auto-discovers `manage.py`, `requirements.txt`, the frontend folder, `llama-server`, and nearby `.gguf` models in common project/system locations.
-If `llama-server` is missing, the launcher can clone and build `ggml-org/llama.cpp` automatically into `.runtime/llama.cpp` when git/build tools are available.
+The launcher also creates `models/` and `llamaserver/`, auto-discovers `manage.py`, `requirements.txt`, the frontend folder, `llama-server`, and nearby `.gguf` models in common project/system locations.
+If `llama-server` is missing, the launcher can clone/update and build `ggml-org/llama.cpp` automatically into `llamaserver/llama.cpp` when git/build tools are available.
 By default Django binds to `0.0.0.0:8000` and serves both the API and the exported frontend. There is no public or internal Next.js runtime server in the normal launcher path. Public URLs are derived from the server IP unless you override `PUBLIC_HOST` or `BACKEND_PUBLIC_HOST`.
 
 ```bash
@@ -72,6 +92,8 @@ The launcher starts:
 - Backend API: `http://127.0.0.1:8000/api`
 - Admin panel: `http://127.0.0.1:8000/admin-panel`
 - Frontend files: `frontend/out`
+- Model files: `models/`
+- llama.cpp source/build: `llamaserver/llama.cpp`
 
 ## Manual Backend
 
@@ -122,8 +144,8 @@ export TTD_LLAMA_CPP_URL=http://127.0.0.1:8080
 Or let the launcher find and start it:
 
 ```bash
-mkdir -p backend/models
-cp /path/to/model.gguf backend/models/
+mkdir -p models llamaserver
+cp /path/to/model.gguf models/
 ./linux.sh
 ```
 
@@ -132,6 +154,8 @@ Useful llama.cpp env vars:
 - `TTD_LLAMA_CPP_URL`: Django target URL, default `http://127.0.0.1:8080`.
 - `LLAMA_CPP_MODEL_PATH`: GGUF file the launcher passes to `llama-server`.
 - `LLAMA_CPP_BIN`: llama.cpp server binary, default `llama-server`.
+- `LLAMA_CPP_SOURCE_DIR`: custom llama.cpp source/build folder, default `llamaserver/llama.cpp`.
+- `TTD_MODEL_DIR`: custom model folder, default `models/`.
 - `LLAMA_CPP_CTX_SIZE`: context size passed to launcher, default `8192`.
 - `LLAMA_CPP_THREADS`: optional thread count.
 - `LLAMA_CPP_GPU_LAYERS`: optional GPU layer count.
