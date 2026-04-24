@@ -1,11 +1,10 @@
 from django.conf import settings
 from django.conf.urls.static import static
-from django.urls import path
+from django.urls import path, re_path
 
 from core import views
 
 urlpatterns = [
-    path("", views.index),
     path("api", views.api_index),
     path("api/health", views.health),
     path("api/chats", views.chats_collection),
@@ -26,6 +25,8 @@ urlpatterns = [
     path("api/admin/requests/export", views.admin_requests_export),
     path("api/admin/server", views.admin_server),
     path("api/admin/sessions", views.admin_sessions),
+    path("", views.index),
+    re_path(r"^(?!api(?:/|$)|media(?:/|$)).*$", views.frontend_proxy),
 ]
 
 if settings.DEBUG:

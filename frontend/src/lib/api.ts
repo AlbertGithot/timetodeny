@@ -1,7 +1,9 @@
-export const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://127.0.0.1:8000/api';
+const RAW_API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/api';
+export const API_BASE = RAW_API_BASE.endsWith('/') && RAW_API_BASE !== '/' ? RAW_API_BASE.slice(0, -1) : RAW_API_BASE;
 
 export function apiUrl(path: string): string {
-  return `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return API_BASE === '/' ? normalizedPath : `${API_BASE}${normalizedPath}`;
 }
 
 export function getAdminToken(): string {

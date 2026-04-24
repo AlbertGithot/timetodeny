@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from email.message import Message
 from unittest.mock import patch
 
 from django.test import Client, TestCase, override_settings
@@ -21,6 +22,26 @@ class FakeLlamaResponse:
         yield b'data: {"content":"Hello","stop":false}\n\n'
         yield b'data: {"content":" world","stop":false}\n\n'
         yield b'data: {"content":"","stop":true}\n\n'
+
+
+class FakeFrontendResponse:
+    def __init__(self, body: bytes, status: int = 200, content_type: str = "text/html; charset=utf-8") -> None:
+        self._body = body
+        self.status = status
+        self.headers = Message()
+        self.headers["Content-Type"] = content_type
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._body
+
+    def getcode(self) -> int:
+        return self.status
 
 
 @override_settings(ALLOWED_HOSTS=["testserver", "127.0.0.1", "localhost"])
@@ -58,11 +79,17 @@ class ApiSmokeTests(TestCase):
         self.assertEqual(allowed.status_code, 200)
         self.assertTrue(allowed.json()["ok"])
 
-    def test_root_explains_frontend_url(self) -> None:
+    @patch("urllib.request.urlopen", return_value=FakeFrontendResponse(b"<html><body>chat ui</body></html>"))
+    def test_root_proxies_frontend(self, _urlopen) -> None:
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Time To Deny backend is running")
-        self.assertContains(response, "http://127.0.0.1:4028")
+        self.assertContains(response, "chat ui")
+
+    @patch("urllib.request.urlopen", return_value=FakeFrontendResponse(b"panel", content_type="text/plain"))
+    def test_non_api_route_proxies_frontend(self, _urlopen) -> None:
+        response = self.client.get("/admin-panel")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"panel")
 
     def test_api_index_explains_backend(self) -> None:
         response = self.client.get("/api")

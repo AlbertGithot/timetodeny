@@ -37,7 +37,7 @@ LLAMA_LOG_FILE="${LOG_DIR}/llama.log"
 SERVER_BIND_HOST="${SERVER_BIND_HOST:-0.0.0.0}"
 BACKEND_HOST="${BACKEND_HOST:-$SERVER_BIND_HOST}"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
-FRONTEND_HOST="${FRONTEND_HOST:-$SERVER_BIND_HOST}"
+FRONTEND_HOST="${FRONTEND_HOST:-127.0.0.1}"
 FRONTEND_PORT="${FRONTEND_PORT:-4028}"
 LLAMA_CPP_HOST="${LLAMA_CPP_HOST:-127.0.0.1}"
 LLAMA_CPP_PORT="${LLAMA_CPP_PORT:-8080}"
@@ -45,7 +45,6 @@ NODE_VERSION="${NODE_VERSION:-24.15.0}"
 PUBLIC_SCHEME="${PUBLIC_SCHEME:-http}"
 PUBLIC_HOST="${PUBLIC_HOST:-}"
 BACKEND_PUBLIC_HOST="${BACKEND_PUBLIC_HOST:-}"
-FRONTEND_PUBLIC_HOST="${FRONTEND_PUBLIC_HOST:-}"
 
 export TTD_MODEL_BACKEND="${TTD_MODEL_BACKEND:-llamacpp}"
 export TTD_LLAMA_CPP_URL="${TTD_LLAMA_CPP_URL:-http://${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}}"
@@ -225,12 +224,12 @@ resolve_network_config() {
 
   detected_public_host="$(detect_public_host)"
   BACKEND_PUBLIC_HOST="${BACKEND_PUBLIC_HOST:-$detected_public_host}"
-  FRONTEND_PUBLIC_HOST="${FRONTEND_PUBLIC_HOST:-$detected_public_host}"
 
-  export NEXT_PUBLIC_API_BASE="${NEXT_PUBLIC_API_BASE:-${PUBLIC_SCHEME}://${BACKEND_PUBLIC_HOST}:${BACKEND_PORT}/api}"
-  export TTD_FRONTEND_ORIGIN="${TTD_FRONTEND_ORIGIN:-${PUBLIC_SCHEME}://${FRONTEND_PUBLIC_HOST}:${FRONTEND_PORT}}"
+  export NEXT_PUBLIC_API_BASE="${NEXT_PUBLIC_API_BASE:-/api}"
+  export TTD_FRONTEND_ORIGIN="${TTD_FRONTEND_ORIGIN:-${PUBLIC_SCHEME}://${BACKEND_PUBLIC_HOST}:${BACKEND_PORT}}"
+  export TTD_FRONTEND_INTERNAL_URL="${TTD_FRONTEND_INTERNAL_URL:-http://${FRONTEND_HOST}:${FRONTEND_PORT}}"
 
-  allowed_hosts="127.0.0.1,localhost,0.0.0.0,${BACKEND_PUBLIC_HOST},${FRONTEND_PUBLIC_HOST}"
+  allowed_hosts="127.0.0.1,localhost,0.0.0.0,${BACKEND_PUBLIC_HOST}"
   if command -v hostname >/dev/null 2>&1; then
     allowed_hosts="${allowed_hosts},$(hostname 2>/dev/null || true),$(hostname -f 2>/dev/null || true)"
   fi
@@ -737,8 +736,17 @@ prepare_runtime_environment() {
   fi
 }
 
+build_frontend_release() {
+  (
+    cd "$FRONTEND_DIR"
+    npm run build
+  )
+}
+
 start_stack_detached() {
   prepare_runtime_environment "$@"
+
+  build_frontend_release
 
   if [ "$TTD_MODEL_BACKEND" = "llamacpp" ]; then
     spawn_detached "llama.cpp" "$LLAMA_PID_FILE" "$LLAMA_LOG_FILE" "$ROOT_DIR" "$LLAMA_CPP_BIN" "${LLAMA_ARGS[@]}"
@@ -748,11 +756,12 @@ start_stack_detached() {
     "$PYTHON" "$MANAGE_PY" runserver "${BACKEND_HOST}:${BACKEND_PORT}" --noreload
 
   spawn_detached "frontend" "$FRONTEND_PID_FILE" "$FRONTEND_LOG_FILE" "$FRONTEND_DIR" \
-    "$NEXT_BIN" dev -H "$FRONTEND_HOST" -p "$FRONTEND_PORT"
+    "$NEXT_BIN" start -H "$FRONTEND_HOST" -p "$FRONTEND_PORT"
 
-  echo "Backend API: ${NEXT_PUBLIC_API_BASE}"
-  echo "Frontend:    ${TTD_FRONTEND_ORIGIN}"
-  echo "Admin:       ${TTD_FRONTEND_ORIGIN}/admin-panel"
+  echo "Site:              ${TTD_FRONTEND_ORIGIN}"
+  echo "Admin:             ${TTD_FRONTEND_ORIGIN}/admin-panel"
+  echo "Backend API:       ${TTD_FRONTEND_ORIGIN}/api"
+  echo "Frontend internal: ${TTD_FRONTEND_INTERNAL_URL}"
   echo "Logs:        ${LOG_DIR}"
 }
 
@@ -781,9 +790,10 @@ start_stack_foreground() {
   "$PYTHON" "$MANAGE_PY" runserver "${BACKEND_HOST}:${BACKEND_PORT}" &
   BACKEND_PID=$!
 
-  echo "Backend API: ${NEXT_PUBLIC_API_BASE}"
-  echo "Frontend:    ${TTD_FRONTEND_ORIGIN}"
-  echo "Admin:       ${TTD_FRONTEND_ORIGIN}/admin-panel"
+  echo "Site:              ${TTD_FRONTEND_ORIGIN}"
+  echo "Admin:             ${TTD_FRONTEND_ORIGIN}/admin-panel"
+  echo "Backend API:       ${TTD_FRONTEND_ORIGIN}/api"
+  echo "Frontend internal: ${TTD_FRONTEND_INTERNAL_URL}"
 
   (
     cd "$FRONTEND_DIR"

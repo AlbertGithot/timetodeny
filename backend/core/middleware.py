@@ -15,8 +15,16 @@ class SimpleCorsMiddleware:
             response = self.get_response(request)
 
         origin = request.headers.get("Origin")
-        allowed = {settings.TTD_FRONTEND_ORIGIN, "http://localhost:4028", "http://127.0.0.1:4028"}
-        if origin in allowed or settings.DEBUG:
+        origin_normalized = origin.rstrip("/") if origin else ""
+        allowed = {
+            settings.TTD_FRONTEND_ORIGIN.rstrip("/"),
+            settings.TTD_FRONTEND_INTERNAL_URL.rstrip("/"),
+            "http://localhost:8000",
+            "http://127.0.0.1:8000",
+            "http://localhost:4028",
+            "http://127.0.0.1:4028",
+        }
+        if origin_normalized in allowed or settings.DEBUG:
             response["Access-Control-Allow-Origin"] = origin or settings.TTD_FRONTEND_ORIGIN
             response["Vary"] = "Origin"
         response["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"

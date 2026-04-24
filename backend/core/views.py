@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import time
 from io import StringIO
+import urllib.error
+import urllib.request
 from uuid import UUID
 
 from django.conf import settings
@@ -34,33 +36,123 @@ from .services import (
 )
 from .utils import client_ip, json_response, log_admin_action, make_token, parse_json, require_admin, sse, user_agent
 
+PROXY_REQUEST_HEADERS = (
+    "Accept",
+    "Accept-Encoding",
+    "Accept-Language",
+    "Cache-Control",
+    "Content-Type",
+    "Cookie",
+    "If-Match",
+    "If-Modified-Since",
+    "If-None-Match",
+    "Pragma",
+    "Range",
+    "Referer",
+    "Sec-CH-UA",
+    "Sec-CH-UA-Mobile",
+    "Sec-CH-UA-Platform",
+    "Sec-Fetch-Dest",
+    "Sec-Fetch-Mode",
+    "Sec-Fetch-Site",
+    "Sec-Fetch-User",
+    "Upgrade-Insecure-Requests",
+    "User-Agent",
+)
+HOP_BY_HOP_RESPONSE_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+}
+
 
 def index(request: HttpRequest):
+    return frontend_proxy(request)
+
+
+def frontend_proxy(request: HttpRequest, proxy_path: str = ""):
+    target_url = _frontend_target_url(request)
+    body = request.body if request.method not in {"GET", "HEAD"} else None
+    upstream_request = urllib.request.Request(target_url, data=body or None, method=request.method)
+
+    for header_name in PROXY_REQUEST_HEADERS:
+        header_value = request.headers.get(header_name)
+        if header_value:
+            upstream_request.add_header(header_name, header_value)
+
+    upstream_request.add_header("X-Forwarded-For", client_ip(request))
+    upstream_request.add_header("X-Forwarded-Proto", request.scheme)
+    upstream_request.add_header("X-Forwarded-Host", request.get_host())
+
+    try:
+        with urllib.request.urlopen(upstream_request, timeout=settings.TTD_REQUEST_TIMEOUT_SECONDS) as upstream:
+            return _frontend_proxy_response(upstream)
+    except urllib.error.HTTPError as exc:
+        return _frontend_proxy_response(exc)
+    except urllib.error.URLError as exc:
+        return _frontend_unavailable_response(request, exc)
+
+
+def _frontend_target_url(request: HttpRequest) -> str:
+    full_path = request.get_full_path()
+    if not full_path.startswith("/"):
+        full_path = f"/{full_path}"
+    return f"{settings.TTD_FRONTEND_INTERNAL_URL.rstrip('/')}{full_path}"
+
+
+def _frontend_proxy_response(upstream) -> HttpResponse:
+    response = HttpResponse(content=upstream.read(), status=getattr(upstream, "status", upstream.getcode()))
+    for header_name, header_value in upstream.headers.items():
+        if header_name.lower() in HOP_BY_HOP_RESPONSE_HEADERS:
+            continue
+        response[header_name] = header_value
+    return response
+
+
+def _frontend_unavailable_response(request: HttpRequest, exc: urllib.error.URLError) -> HttpResponse:
+    error_text = str(getattr(exc, "reason", exc))
+    if "text/html" not in request.headers.get("Accept", "") and request.path.startswith("/api"):
+        return json_response(
+            {
+                "ok": False,
+                "error": "Frontend is not reachable",
+                "frontendInternalUrl": settings.TTD_FRONTEND_INTERNAL_URL,
+                "detail": error_text,
+            },
+            status=502,
+        )
+
     html = f"""<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Time To Deny Backend</title>
+    <title>Time To Deny</title>
     <style>
       body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #050607; color: #d7fff2; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
-      main {{ width: min(760px, calc(100vw - 32px)); border: 1px solid rgba(0, 255, 136, .35); padding: 24px; background: rgba(0, 255, 136, .04); }}
-      h1 {{ margin: 0 0 12px; font-size: 20px; color: #00ff88; }}
-      p {{ color: #9bb8b0; line-height: 1.6; }}
-      a {{ color: #00ccff; }}
-      code {{ color: #00ff88; }}
+      main {{ width: min(820px, calc(100vw - 32px)); border: 1px solid rgba(255, 84, 112, .28); padding: 24px; background: rgba(255, 84, 112, .06); }}
+      h1 {{ margin: 0 0 12px; font-size: 20px; color: #ff5470; }}
+      p {{ color: #c8d2ce; line-height: 1.6; }}
+      code {{ color: #7ef7c9; }}
+      a {{ color: #6bcfff; }}
     </style>
   </head>
   <body>
     <main>
-      <h1>Time To Deny backend is running</h1>
-      <p>Django is the API server. The chat UI is served by Next.js at <a href="{settings.TTD_FRONTEND_ORIGIN}">{settings.TTD_FRONTEND_ORIGIN}</a>.</p>
-      <p>If that link does not open, the frontend process is not running. Start the project with <code>./linux.sh</code> so llama.cpp, Django, and Next.js come up together.</p>
-      <p>API health: <a href="/api/health">/api/health</a></p>
+      <h1>Frontend is not running</h1>
+      <p>Django is reachable on <code>{settings.TTD_FRONTEND_ORIGIN}</code>, but the internal Next.js process at <code>{settings.TTD_FRONTEND_INTERNAL_URL}</code> did not answer.</p>
+      <p>Start the stack with <code>./linux.sh start</code> and then check <code>./linux.sh logs</code> if it still acts like a genius.</p>
+      <p>API health stays available at <a href="/api/health">/api/health</a>.</p>
+      <p>Proxy error: <code>{error_text}</code></p>
     </main>
   </body>
 </html>"""
-    return HttpResponse(html)
+    return HttpResponse(html, status=502)
 
 
 def api_index(request: HttpRequest):
@@ -70,7 +162,7 @@ def api_index(request: HttpRequest):
             "service": "timetodeny-backend",
             "frontend": settings.TTD_FRONTEND_ORIGIN,
             "health": "/api/health",
-            "note": "Open the frontend URL for the chat UI. Django serves the API, not the Next.js page.",
+            "note": "The chat UI is served on / through Django proxying to the internal Next.js process.",
         }
     )
 
