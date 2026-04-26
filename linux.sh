@@ -21,7 +21,7 @@ LOG_DIR="${RUNTIME_DIR}/logs"
 
 ACTION="${1:-start}"
 case "$ACTION" in
-  start|stop|restart|status|logs|foreground)
+  start|stop|restart|status|logs|foreground|install-service|uninstall-service)
     shift || true
     ;;
   *)
@@ -55,6 +55,7 @@ export TTD_FORCE_TAKE_PORTS="${TTD_FORCE_TAKE_PORTS:-1}"
 export TTD_UPGRADE_PIP="${TTD_UPGRADE_PIP:-0}"
 export LLAMA_CPP_REPO_URL="${LLAMA_CPP_REPO_URL:-https://github.com/ggml-org/llama.cpp.git}"
 export LLAMA_CPP_REPO_REF="${LLAMA_CPP_REPO_REF:-master}"
+export TTD_SERVICE_NAME="${TTD_SERVICE_NAME:-timetodeny}"
 
 auto_update_repo() {
   local current_branch before_head after_head upstream_ref
@@ -1045,6 +1046,75 @@ show_logs() {
   tail -n "${TAIL_LINES:-120}" -f "$BACKEND_LOG_FILE" "$FRONTEND_LOG_FILE" "$LLAMA_LOG_FILE"
 }
 
+install_systemd_service() {
+  local service_file="/etc/systemd/system/${TTD_SERVICE_NAME}.service"
+  local service_user service_group
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "systemd is not available on this host"
+    exit 1
+  fi
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "Run as root: sudo ./linux.sh install-service"
+    exit 1
+  fi
+
+  resolve_repo_layout
+  service_user="${TTD_SERVICE_USER:-$(id -un)}"
+  service_group="${TTD_SERVICE_GROUP:-$(id -gn)}"
+
+  cat > "$service_file" <<EOF
+[Unit]
+Description=Time To Deny local AI stack
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${service_user}
+Group=${service_group}
+WorkingDirectory=${ROOT_DIR}
+Environment=TTD_MODEL_BACKEND=${TTD_MODEL_BACKEND}
+Environment=TTD_AUTO_UPDATE=${TTD_AUTO_UPDATE}
+Environment=TTD_FORCE_TAKE_PORTS=${TTD_FORCE_TAKE_PORTS}
+Environment=SERVER_BIND_HOST=${SERVER_BIND_HOST}
+Environment=BACKEND_PORT=${BACKEND_PORT}
+ExecStart=${SCRIPT_PATH} foreground
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable "${TTD_SERVICE_NAME}.service"
+  systemctl restart "${TTD_SERVICE_NAME}.service"
+  echo "Installed and started ${TTD_SERVICE_NAME}.service"
+  echo "Status:  systemctl status ${TTD_SERVICE_NAME}.service"
+  echo "Logs:    journalctl -u ${TTD_SERVICE_NAME}.service -f"
+}
+
+uninstall_systemd_service() {
+  local service_file="/etc/systemd/system/${TTD_SERVICE_NAME}.service"
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "systemd is not available on this host"
+    exit 1
+  fi
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "Run as root: sudo ./linux.sh uninstall-service"
+    exit 1
+  fi
+
+  systemctl disable --now "${TTD_SERVICE_NAME}.service" >/dev/null 2>&1 || true
+  rm -f "$service_file"
+  systemctl daemon-reload
+  echo "Removed ${TTD_SERVICE_NAME}.service"
+}
+
 ensure_runtime_dirs
 
 case "$ACTION" in
@@ -1066,5 +1136,11 @@ case "$ACTION" in
     ;;
   foreground)
     start_stack_foreground "$@"
+    ;;
+  install-service)
+    install_systemd_service
+    ;;
+  uninstall-service)
+    uninstall_systemd_service
     ;;
 esac

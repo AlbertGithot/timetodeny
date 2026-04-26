@@ -90,6 +90,8 @@ Useful launcher commands:
 ./linux.sh status
 ./linux.sh logs
 ./linux.sh foreground
+./linux.sh install-service
+./linux.sh uninstall-service
 ```
 
 The launcher starts:
@@ -104,6 +106,18 @@ The launcher starts:
 
 Model installs from the admin panel download the requested HuggingFace `.gguf` file into `models/` by default. Set `TTD_ALLOW_HF_DOWNLOAD=0` only if you intentionally want to block web downloads.
 When a ready model is selected, the launcher prefers that registered local file. If the Django chat sees that `llama-server` is not listening, it also tries to start the managed `llama-server` process automatically before sending the prompt.
+The model registry is synchronized from real `.gguf` files under `models/`; stale registry rows without a local file are removed from the UI.
+
+Install the systemd service on a server:
+
+```bash
+cd /opt/timetodeny
+./linux.sh install-service
+systemctl status timetodeny.service
+journalctl -u timetodeny.service -f
+```
+
+The admin model registry includes a llama.cpp runtime health panel with selected model path, PID, port state, last log lines, and a restart button.
 
 ## Manual Backend
 

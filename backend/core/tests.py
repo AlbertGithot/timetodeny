@@ -142,6 +142,93 @@ class ApiSmokeTests(TestCase):
         self.assertEqual(model.status, "error")
         self.assertIn("not found", model.local_path)
 
+    def test_models_collection_syncs_only_existing_local_files(self) -> None:
+        model_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(model_dir.cleanup)
+        real_path = Path(model_dir.name) / "real-q4_k_m.gguf"
+        real_path.write_bytes(b"gguf")
+        ModelRegistry.objects.create(
+            name="fake-ready",
+            repo_id="fake/repo",
+            filename="missing.gguf",
+            status="ready",
+            selected=True,
+        )
+
+        with override_settings(TTD_MODEL_DIR=Path(model_dir.name)):
+            response = self.client.get("/api/models")
+
+        self.assertEqual(response.status_code, 200)
+        names = [item["name"] for item in response.json()["models"]]
+        self.assertEqual(names, ["real-q4_k_m"])
+        self.assertFalse(ModelRegistry.objects.filter(name="fake-ready").exists())
+        self.assertTrue(ModelRegistry.objects.get(name="real-q4_k_m").selected)
+
+    def test_model_delete_removes_local_file(self) -> None:
+        model_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(model_dir.cleanup)
+        model_path = Path(model_dir.name) / "delete-me.gguf"
+        model_path.write_bytes(b"gguf")
+        model = ModelRegistry.objects.create(
+            name="delete-me",
+            repo_id="local",
+            filename="delete-me.gguf",
+            status="ready",
+            selected=True,
+            local_path=str(model_path),
+        )
+        login = self.client.post(
+            "/api/admin/login",
+            data=json.dumps({"password": "1111"}),
+            content_type="application/json",
+        )
+        token = login.json()["token"]
+
+        with override_settings(TTD_MODEL_DIR=Path(model_dir.name)):
+            response = self.client.post(
+                f"/api/models/{model.id}/delete",
+                data=json.dumps({}),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=f"Bearer {token}",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(model_path.exists())
+        self.assertFalse(ModelRegistry.objects.filter(id=model.id).exists())
+
+    def test_model_runtime_restart_uses_selected_local_model(self) -> None:
+        model_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(model_dir.cleanup)
+        model_path = Path(model_dir.name) / "runtime.gguf"
+        model_path.write_bytes(b"gguf")
+        ModelRegistry.objects.create(
+            name="runtime",
+            repo_id="local",
+            filename="runtime.gguf",
+            status="ready",
+            selected=True,
+            local_path=str(model_path),
+        )
+        login = self.client.post(
+            "/api/admin/login",
+            data=json.dumps({"password": "1111"}),
+            content_type="application/json",
+        )
+        token = login.json()["token"]
+
+        with override_settings(TTD_MODEL_DIR=Path(model_dir.name)):
+            with patch("core.views.restart_llama_server", return_value={"running": True, "selectedModel": "runtime"}) as restart:
+                response = self.client.post(
+                    "/api/models/restart",
+                    data=json.dumps({}),
+                    content_type="application/json",
+                    HTTP_AUTHORIZATION=f"Bearer {token}",
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["runtime"]["running"])
+        restart.assert_called_once()
+
     def test_root_serves_exported_frontend(self) -> None:
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)

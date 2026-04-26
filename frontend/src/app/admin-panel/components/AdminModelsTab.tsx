@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { toast } from 'sonner';
-import { Download, Trash2, Eye, EyeOff, Terminal, CheckCircle, AlertTriangle, Search, RefreshCw, Play, Square } from 'lucide-react';
+import { Download, Trash2, Eye, EyeOff, Terminal, CheckCircle, AlertTriangle, Search, RefreshCw, Play, Square, Activity } from 'lucide-react';
 import { getJson, postJson } from '@/lib/api';
 
 interface ModelEntry {
@@ -75,6 +75,27 @@ interface SearchResponse {
   results: SearchResult[];
 }
 
+interface RuntimeInfo {
+  backend: string;
+  url: string;
+  portOpen: boolean;
+  running: boolean;
+  managedPid?: number | null;
+  managedPidRunning: boolean;
+  selectedModel?: string | null;
+  modelPath?: string | null;
+  modelFileExists: boolean;
+  binary?: string | null;
+  binaryExists: boolean;
+  logFile: string;
+  logTail: string;
+}
+
+interface RuntimeResponse {
+  ok: boolean;
+  runtime: RuntimeInfo;
+}
+
 function inferQuantization(filename: string): string {
   const upper = filename.toUpperCase();
   const markers = ['Q8_0', 'Q6_K', 'Q5_K_M', 'Q5_K_S', 'Q4_K_M', 'Q4_K_S', 'Q3_K_M', 'Q2_K', 'F16'];
@@ -93,6 +114,8 @@ export default function AdminModelsTab() {
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [installing, setInstalling] = useState(false);
   const [installProgress, setInstallProgress] = useState(0);
+  const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
+  const [runtimeBusy, setRuntimeBusy] = useState(false);
 
   const { register, handleSubmit, reset, setValue, formState: { errors } } = useForm<InstallForm>({
     defaultValues: {
@@ -108,8 +131,15 @@ export default function AdminModelsTab() {
       .catch((error: Error) => toast.error(error.message));
   };
 
+  const loadRuntime = () => {
+    getJson<RuntimeResponse>('/models/runtime', true)
+      .then(payload => setRuntime(payload.runtime))
+      .catch(() => undefined);
+  };
+
   useEffect(() => {
     loadModels();
+    loadRuntime();
   }, []);
 
   const filtered = models.filter(m =>
@@ -125,6 +155,7 @@ export default function AdminModelsTab() {
     try {
       const payload = await postJson<ModelResponse>(`/models/${id}/select`, {}, true);
       setModels(prev => prev.map(m => m.id === id ? payload.model : { ...m, selected: false }));
+      loadRuntime();
       toast.success(`${payload.model.name} selected for responses`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Model select failed');
@@ -175,6 +206,7 @@ export default function AdminModelsTab() {
       await postJson(`/models/${id}/delete`, {}, true);
       setModels(prev => prev.filter(m => m.id !== id));
       setDeleteConfirm(null);
+      loadRuntime();
       toast.success('Model removed from registry');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Delete failed');
@@ -211,6 +243,7 @@ export default function AdminModelsTab() {
         const exists = prev.some(model => model.id === payload.model.id);
         return exists ? prev.map(model => model.id === payload.model.id ? payload.model : model) : [...prev, payload.model];
       });
+      loadRuntime();
       reset();
       toast.success(`Model installed: ${data.filename}`);
     } catch (error) {
@@ -249,6 +282,20 @@ export default function AdminModelsTab() {
     toast.success(`Install form filled from ${result.repoId}`);
   };
 
+  const handleRuntimeRestart = async () => {
+    setRuntimeBusy(true);
+    try {
+      const payload = await postJson<RuntimeResponse>('/models/restart', {}, true);
+      setRuntime(payload.runtime);
+      toast.success('llama.cpp restarted');
+    } catch (error) {
+      loadRuntime();
+      toast.error(error instanceof Error ? error.message : 'Runtime restart failed');
+    } finally {
+      setRuntimeBusy(false);
+    }
+  };
+
   // Compatibility check
   const visionModels = models.filter(m => m.type === 'vision');
   const selectedModel = models.find(m => m.selected);
@@ -275,6 +322,77 @@ export default function AdminModelsTab() {
               ? `Active model: ${selectedModel?.name || 'none'} (${selectedModel?.type?.toUpperCase() || '—'}) · Compatible with chat interface · ${visionModels.length} vision model(s) available for /imagine`
               : `Vision model selected as primary — vision models cannot handle text chat. Select a TEXT or CODE model for chat responses.`
             }
+          </div>
+        </div>
+      </div>
+
+      {/* Runtime health */}
+      <div className="bg-ttd-surface border border-ttd-border rounded-sm overflow-hidden">
+        <div className="px-4 py-3 border-b border-ttd-border flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Activity size={13} className={runtime?.running ? 'text-ttd-green' : 'text-ttd-red'} />
+            <span className="text-xs font-bold tracking-wider text-ttd-text">LLAMA.CPP RUNTIME</span>
+            <span className={`text-[10px] border px-1.5 py-0.5 rounded-sm ${
+              runtime?.running ? 'text-ttd-green border-ttd-green/30 bg-ttd-green/5' : 'text-ttd-red border-ttd-red/30 bg-ttd-red/5'
+            }`}>
+              {runtime?.running ? 'RUNNING' : 'STOPPED'}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={loadRuntime}
+              disabled={runtimeBusy}
+              className="ttd-btn ttd-btn-ghost text-[10px] px-3 py-1 flex items-center gap-1 disabled:opacity-50"
+            >
+              <RefreshCw size={10} />
+              REFRESH
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleRuntimeRestart()}
+              disabled={runtimeBusy || !selectedModel}
+              className="ttd-btn ttd-btn-green text-[10px] px-3 py-1 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <RefreshCw size={10} className={runtimeBusy ? 'animate-spin' : ''} />
+              RESTART MODEL
+            </button>
+          </div>
+        </div>
+        <div className="p-4 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(280px,420px)] gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px]">
+            <div className="bg-ttd-elevated rounded-sm px-3 py-2">
+              <div className="text-ttd-dim mb-1">URL</div>
+              <div className="text-ttd-cyan font-mono truncate" title={runtime?.url}>{runtime?.url || '-'}</div>
+            </div>
+            <div className="bg-ttd-elevated rounded-sm px-3 py-2">
+              <div className="text-ttd-dim mb-1">PID</div>
+              <div className="text-ttd-text font-mono">
+                {runtime?.managedPid ? `${runtime.managedPid}${runtime.managedPidRunning ? ' active' : ' stale'}` : '-'}
+              </div>
+            </div>
+            <div className="bg-ttd-elevated rounded-sm px-3 py-2">
+              <div className="text-ttd-dim mb-1">MODEL</div>
+              <div className="text-ttd-text font-mono truncate" title={runtime?.selectedModel || ''}>{runtime?.selectedModel || '-'}</div>
+            </div>
+            <div className="bg-ttd-elevated rounded-sm px-3 py-2">
+              <div className="text-ttd-dim mb-1">BINARY</div>
+              <div className="text-ttd-text font-mono truncate" title={runtime?.binary || ''}>{runtime?.binary || '-'}</div>
+            </div>
+            <div className="md:col-span-2 bg-ttd-elevated rounded-sm px-3 py-2">
+              <div className="text-ttd-dim mb-1">MODEL FILE</div>
+              <div className={`${runtime?.modelFileExists ? 'text-ttd-green' : 'text-ttd-red'} font-mono truncate`} title={runtime?.modelPath || ''}>
+                {runtime?.modelPath || 'No selected local model file'}
+              </div>
+            </div>
+          </div>
+          <div className="bg-ttd-bg border border-ttd-border rounded-sm p-3 min-h-36">
+            <div className="text-[10px] text-ttd-muted mb-2 tracking-wider uppercase truncate" title={runtime?.logFile || ''}>
+              {runtime?.logFile || 'runtime log'}
+            </div>
+            <pre className="text-[10px] text-ttd-dim whitespace-pre-wrap max-h-40 overflow-auto">
+              {runtime?.logTail || 'No llama.cpp log lines yet.'}
+            </pre>
           </div>
         </div>
       </div>

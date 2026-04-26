@@ -15,7 +15,8 @@ from django.http import FileResponse, HttpRequest, HttpResponse, StreamingHttpRe
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
-from .llama_runtime import ensure_llama_server, stop_managed_llama
+from .llama_runtime import ensure_llama_server, llama_runtime_status, restart_llama_server, stop_managed_llama
+from .model_registry import delete_local_model_file, file_size_label, sync_model_registry_with_files
 from .models import AdminSession, AdminSetting, Attachment, Chat, GeneratedFile, Message, ModelRegistry, RequestLog
 from .seed import ensure_defaults
 from .serializers import (
@@ -347,7 +348,8 @@ def chat_stream(request: HttpRequest):
 
 def selected_model_name() -> str:
     ensure_defaults()
-    selected = ModelRegistry.objects.filter(selected=True).first()
+    sync_model_registry_with_files()
+    selected = ModelRegistry.objects.filter(selected=True, status="ready").first()
     return selected.name if selected else "local-assistant"
 
 
@@ -367,8 +369,9 @@ def title_from_prompt(prompt: str) -> str:
 @csrf_exempt
 def models_collection(request: HttpRequest):
     ensure_defaults()
+    sync_model_registry_with_files()
     if request.method == "GET":
-        models = [model_to_dict(model) for model in ModelRegistry.objects.all()]
+        models = [model_to_dict(model) for model in ModelRegistry.objects.filter(status="ready")]
         return json_response({"ok": True, "models": models})
     return json_response({"ok": False, "error": "Method not allowed"}, status=405)
 
@@ -428,28 +431,6 @@ def download_huggingface_model(repo_id: str, filename: str) -> tuple[str, str]:
     return str(local_path), file_size_label(str(local_path))
 
 
-def delete_local_model_file(local_path: str) -> None:
-    if not local_path:
-        return
-
-    try:
-        model_root = settings.TTD_MODEL_DIR.resolve()
-        candidate = Path(local_path).expanduser()
-        if not candidate.is_absolute():
-            candidate = model_root / candidate
-        candidate = candidate.resolve()
-    except OSError:
-        return
-
-    if candidate != model_root and model_root not in candidate.parents:
-        return
-    if candidate.is_file():
-        try:
-            candidate.unlink()
-        except OSError:
-            return
-
-
 @csrf_exempt
 def model_install(request: HttpRequest):
     session, error = require_admin(request)
@@ -506,6 +487,7 @@ def model_install(request: HttpRequest):
     model.local_path = local_path
     model.download_progress = 100
     model.save(update_fields=["status", "size", "local_path", "download_progress", "updated_at"])
+    sync_model_registry_with_files()
     log_admin_action(request, f"Downloaded model: {model.name}", session)
     return json_response({"ok": True, "model": model_to_dict(model)}, status=201 if created else 200)
 
@@ -521,6 +503,9 @@ def model_action(request: HttpRequest, model_id: UUID, action: str):
 
     data = parse_json(request) if request.body else {}
     if action == "select":
+        if model.status != "ready" or not model.local_path or not Path(model.local_path).is_file():
+            sync_model_registry_with_files()
+            return json_response({"ok": False, "error": "Model file is missing. Reinstall the model first."}, status=400)
         ModelRegistry.objects.exclude(id=model.id).update(selected=False)
         model.selected = True
         stop_managed_llama()
@@ -532,8 +517,12 @@ def model_action(request: HttpRequest, model_id: UUID, action: str):
         model.hidden = False
     elif action == "delete":
         name = model.name
+        was_selected = model.selected
         delete_local_model_file(model.local_path)
         model.delete()
+        if was_selected:
+            stop_managed_llama()
+        sync_model_registry_with_files()
         log_admin_action(request, f"Deleted model: {name}", session)
         return json_response({"ok": True})
     elif action == "prompt":
@@ -557,6 +546,7 @@ def model_action(request: HttpRequest, model_id: UUID, action: str):
         model.size = size
         model.local_path = local_path
         model.download_progress = 100
+        sync_model_registry_with_files()
     else:
         return json_response({"ok": False, "error": "Unknown model action"}, status=400)
 
@@ -587,7 +577,8 @@ def models_hide_all(request: HttpRequest):
 
 def models_compatibility(request: HttpRequest):
     ensure_defaults()
-    selected = ModelRegistry.objects.filter(selected=True).first()
+    sync_model_registry_with_files()
+    selected = ModelRegistry.objects.filter(selected=True, status="ready").first()
     text_ready = ModelRegistry.objects.filter(model_type__in=["text", "code"], status="ready").exists()
     vision_ready = ModelRegistry.objects.filter(model_type="vision", status="ready").exists()
     ok = bool(selected and selected.model_type in ["text", "code"] and text_ready)
@@ -599,6 +590,35 @@ def models_compatibility(request: HttpRequest):
     elif not vision_ready:
         reason = "Chat model is OK, but no ready vision model is available for image requests."
     return json_response({"ok": True, "compatible": ok, "reason": reason, "visionReady": vision_ready})
+
+
+def models_runtime(request: HttpRequest):
+    session, error = require_admin(request)
+    if error:
+        return error
+    sync_model_registry_with_files()
+    log_admin_action(request, "Viewed llama.cpp runtime health", session)
+    return json_response({"ok": True, "runtime": llama_runtime_status()})
+
+
+@csrf_exempt
+def models_runtime_restart(request: HttpRequest):
+    session, error = require_admin(request)
+    if error:
+        return error
+    if request.method != "POST":
+        return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+    sync_model_registry_with_files()
+    selected = ModelRegistry.objects.filter(selected=True, status="ready").first()
+    if not selected:
+        return json_response({"ok": False, "error": "No ready model selected"}, status=400)
+    try:
+        runtime = restart_llama_server(selected)
+    except Exception as exc:
+        log_admin_action(request, f"llama.cpp restart failed: {exc}", session)
+        return json_response({"ok": False, "error": str(exc), "runtime": llama_runtime_status()}, status=502)
+    log_admin_action(request, f"Restarted llama.cpp runtime: {selected.name}", session)
+    return json_response({"ok": True, "runtime": runtime})
 
 
 @csrf_exempt
@@ -723,14 +743,3 @@ def admin_sessions(request: HttpRequest):
     log_admin_action(request, "Viewed Sessions tab", session)
     sessions = [session_to_dict(item) for item in AdminSession.objects.prefetch_related("actions").all()[:250]]
     return json_response({"ok": True, "sessions": sessions})
-
-
-def file_size_label(path: str) -> str:
-    try:
-        size = settings.TTD_MODEL_DIR.joinpath(path).stat().st_size if not path.startswith("/") else __import__("pathlib").Path(path).stat().st_size
-    except OSError:
-        return "-"
-    gb = size / (1024 ** 3)
-    if gb >= 1:
-        return f"{gb:.2f}GB"
-    return f"{size / (1024 ** 2):.1f}MB"

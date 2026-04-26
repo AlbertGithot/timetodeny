@@ -67,7 +67,7 @@ export default function ChatInterfaceClient() {
   const [mode, setMode] = useState<Mode>(initialMode);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [activeModel, setActiveModel] = useState('deepseek-r1:14b');
+  const [activeModel, setActiveModel] = useState('local-assistant');
   const [inputValue, setInputValue] = useState('');
   const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
   const [chatId, setChatId] = useState<string | null>(searchParams.get('chat'));
@@ -88,7 +88,7 @@ export default function ChatInterfaceClient() {
         setChatId(payload.chat.id);
         setMessages(payload.chat.messages || []);
         setMode(payload.chat.mode || initialMode);
-        setActiveModel(payload.chat.model || 'deepseek-r1:14b');
+        setActiveModel(payload.chat.model || 'local-assistant');
       })
       .catch((error: Error) => toast.error(error.message));
 

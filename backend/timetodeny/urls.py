@@ -13,6 +13,8 @@ urlpatterns = [
     path("api/models", views.models_collection),
     path("api/models/search", views.models_search),
     path("api/models/install", views.model_install),
+    path("api/models/runtime", views.models_runtime),
+    path("api/models/restart", views.models_runtime_restart),
     path("api/models/show-all", views.models_show_all),
     path("api/models/hide-all", views.models_hide_all),
     path("api/models/compatibility", views.models_compatibility),

@@ -53,7 +53,7 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
       .then((payload) => {
         if (cancelled) return;
         const visible = payload.models
-          .filter(model => !model.hidden)
+          .filter(model => !model.hidden && model.status === 'ready')
           .map(model => ({
             id: model.id,
             name: model.name,
@@ -65,7 +65,13 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
         if (visible.length > 0) {
           setModels(visible);
           const selected = visible.find(model => model.selected);
-          if (selected && activeModel === 'deepseek-r1:14b') onModelChange(selected.name);
+          const activeExists = visible.some(model => model.name === activeModel);
+          if (selected && (!activeExists || activeModel === 'deepseek-r1:14b' || activeModel === 'local-assistant')) {
+            onModelChange(selected.name);
+          }
+        } else {
+          setModels([]);
+          if (activeModel === 'deepseek-r1:14b') onModelChange('local-assistant');
         }
       })
       .catch(() => undefined);
@@ -129,8 +135,8 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
           onClick={() => setModelDropOpen(!modelDropOpen)}
           className="flex items-center gap-2 bg-ttd-elevated border border-ttd-border rounded-sm px-3 py-1.5 text-xs hover:border-ttd-border-bright transition-colors"
         >
-          <span className="status-dot status-dot-green flex-shrink-0" />
-          <span className="text-ttd-text">{activeModel}</span>
+          <span className={`status-dot ${models.length ? 'status-dot-green' : 'status-dot-dim'} flex-shrink-0`} />
+          <span className="text-ttd-text">{models.length ? activeModel : 'No local model'}</span>
           <ChevronDown size={11} className="text-ttd-muted" />
         </button>
 
@@ -139,6 +145,11 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
             <div className="px-3 py-2 border-b border-ttd-border">
               <span className="text-[10px] text-ttd-muted tracking-wider uppercase">Select Model</span>
             </div>
+            {models.length === 0 && (
+              <div className="px-3 py-4 text-[11px] text-ttd-muted">
+                No ready `.gguf` files found in models/.
+              </div>
+            )}
             {models.map((m) => (
               <button
                 key={m.id}

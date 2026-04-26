@@ -68,6 +68,14 @@ def _read_managed_pid() -> int | None:
         return None
 
 
+def _log_tail(lines: int = 40) -> str:
+    try:
+        content = _log_file().read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(content[-lines:])
+
+
 def stop_managed_llama() -> None:
     pid = _read_managed_pid()
     if not pid or not _pid_running(pid):
@@ -139,6 +147,36 @@ def _find_llama_server_binary() -> Path | None:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate.resolve()
     return None
+
+
+def llama_runtime_status() -> dict:
+    pid = _read_managed_pid()
+    selected = ModelRegistry.objects.filter(selected=True, status="ready").first()
+    model_path = _selected_model_path(selected)
+    binary = _find_llama_server_binary()
+    port_open = _port_open()
+    pid_running = bool(pid and _pid_running(pid))
+    return {
+        "backend": settings.TTD_MODEL_BACKEND,
+        "url": settings.TTD_LLAMA_CPP_URL,
+        "portOpen": port_open,
+        "running": port_open,
+        "managedPid": pid,
+        "managedPidRunning": pid_running,
+        "selectedModel": selected.name if selected else None,
+        "modelPath": str(model_path) if model_path else None,
+        "modelFileExists": bool(model_path and model_path.is_file()),
+        "binary": str(binary) if binary else None,
+        "binaryExists": bool(binary),
+        "logFile": str(_log_file()),
+        "logTail": _log_tail(),
+    }
+
+
+def restart_llama_server(model: ModelRegistry | None = None) -> dict:
+    stop_managed_llama()
+    ensure_llama_server(model)
+    return llama_runtime_status()
 
 
 def ensure_llama_server(model: ModelRegistry | None = None) -> None:
