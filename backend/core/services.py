@@ -440,30 +440,51 @@ def _iter_llamacpp_tokens(payload: dict, stop_checker: Callable[[], None] | None
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=settings.TTD_REQUEST_TIMEOUT_SECONDS) as response:
-            for raw in response:
-                if stop_checker:
-                    stop_checker()
-                if not raw:
-                    continue
-                line = raw.decode("utf-8").strip()
-                if not line or line.startswith(":"):
-                    continue
-                if line.startswith("data:"):
-                    line = line[5:].strip()
-                if line == "[DONE]":
-                    break
-                item = json.loads(line)
-                token = token_from_llamacpp_chunk(item)
-                if token:
-                    yield token
-                if is_llamacpp_done(item):
-                    break
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+    deadline = time.monotonic() + settings.TTD_LLAMA_READY_TIMEOUT_SECONDS
+    last_error: Exception | None = None
+
+    while time.monotonic() <= deadline:
+        try:
+            with urllib.request.urlopen(req, timeout=settings.TTD_REQUEST_TIMEOUT_SECONDS) as response:
+                for raw in response:
+                    if stop_checker:
+                        stop_checker()
+                    if not raw:
+                        continue
+                    line = raw.decode("utf-8").strip()
+                    if not line or line.startswith(":"):
+                        continue
+                    if line.startswith("data:"):
+                        line = line[5:].strip()
+                    if line == "[DONE]":
+                        return
+                    item = json.loads(line)
+                    token = token_from_llamacpp_chunk(item)
+                    if token:
+                        yield token
+                    if is_llamacpp_done(item):
+                        return
+                return
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code != 503 or time.monotonic() >= deadline:
+                break
+            if stop_checker:
+                stop_checker()
+            time.sleep(2)
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            last_error = exc
+            break
+
+    if isinstance(last_error, urllib.error.HTTPError) and last_error.code == 503:
         raise RuntimeError(
-            f"llama.cpp backend unavailable: {exc}. Start llama-server or switch TTD_MODEL_BACKEND=mock for UI-only dev."
-        ) from exc
+            "llama.cpp model is still not ready after waiting. It is usually still loading, out of RAM/VRAM, "
+            "or crashed during model load. Check Admin -> Server Load -> runtime logs or run ./linux.sh logs."
+        ) from last_error
+
+    raise RuntimeError(
+        f"llama.cpp backend unavailable: {last_error}. Start llama-server or switch TTD_MODEL_BACKEND=mock for UI-only dev."
+    ) from last_error
 
 
 def stream_llamacpp(

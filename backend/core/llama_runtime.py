@@ -6,6 +6,8 @@ import shutil
 import socket
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -39,6 +41,10 @@ def _llama_host_port() -> tuple[str, int]:
     return parsed.hostname or "127.0.0.1", parsed.port or 8080
 
 
+def _health_url() -> str:
+    return f"{settings.TTD_LLAMA_CPP_URL.rstrip('/')}/health"
+
+
 def _socket_host(host: str) -> str:
     return "127.0.0.1" if host in {"0.0.0.0", "::"} else host
 
@@ -50,6 +56,41 @@ def _port_open() -> bool:
             return True
     except OSError:
         return False
+
+
+def _llama_ready() -> tuple[bool, str]:
+    if not _port_open():
+        return False, "port closed"
+    try:
+        with urllib.request.urlopen(_health_url(), timeout=2) as response:
+            body = response.read(256).decode("utf-8", errors="replace").strip()
+            return 200 <= response.status < 300, body or f"HTTP {response.status}"
+    except urllib.error.HTTPError as exc:
+        body = exc.read(256).decode("utf-8", errors="replace").strip()
+        if exc.code == 404:
+            return True, "health endpoint missing; assuming ready"
+        return False, body or f"HTTP {exc.code}"
+    except (OSError, TimeoutError) as exc:
+        return False, str(exc)
+
+
+def _wait_for_llama_ready(proc: subprocess.Popen | None = None, timeout: int | None = None) -> None:
+    timeout = timeout or settings.TTD_LLAMA_READY_TIMEOUT_SECONDS
+    deadline = time.monotonic() + timeout
+    last_status = "not checked"
+
+    while time.monotonic() < deadline:
+        if proc and proc.poll() is not None:
+            raise RuntimeError(f"llama-server exited during startup. Check {_log_file()}.")
+        ready, last_status = _llama_ready()
+        if ready:
+            return
+        time.sleep(1)
+
+    raise RuntimeError(
+        f"llama-server opened {settings.TTD_LLAMA_CPP_URL}, but the model was not ready within {timeout}s "
+        f"(/health: {last_status}). Check {_log_file()}."
+    )
 
 
 def _pid_running(pid: int) -> bool:
@@ -155,12 +196,15 @@ def llama_runtime_status() -> dict:
     model_path = _selected_model_path(selected)
     binary = _find_llama_server_binary()
     port_open = _port_open()
+    ready, health = _llama_ready() if port_open else (False, "port closed")
     pid_running = bool(pid and _pid_running(pid))
     return {
         "backend": settings.TTD_MODEL_BACKEND,
         "url": settings.TTD_LLAMA_CPP_URL,
         "portOpen": port_open,
-        "running": port_open,
+        "ready": ready,
+        "health": health,
+        "running": ready,
         "managedPid": pid,
         "managedPidRunning": pid_running,
         "selectedModel": selected.name if selected else None,
@@ -183,6 +227,7 @@ def ensure_llama_server(model: ModelRegistry | None = None) -> None:
     if settings.TTD_MODEL_BACKEND not in {"llamacpp", "llama.cpp"}:
         return
     if _port_open():
+        _wait_for_llama_ready(timeout=settings.TTD_LLAMA_READY_TIMEOUT_SECONDS)
         return
 
     model_path = _selected_model_path(model)
@@ -220,12 +265,13 @@ def ensure_llama_server(model: ModelRegistry | None = None) -> None:
     log_handle.close()
     _pid_file().write_text(str(proc.pid), encoding="utf-8")
 
-    timeout = int(os.environ.get("TTD_LLAMA_START_TIMEOUT_SECONDS", "90"))
+    timeout = int(os.environ.get("TTD_LLAMA_START_TIMEOUT_SECONDS", str(settings.TTD_LLAMA_READY_TIMEOUT_SECONDS)))
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(f"llama-server exited during startup. Check {_log_file()}.")
         if _port_open():
+            _wait_for_llama_ready(proc, timeout=max(1, int(deadline - time.monotonic())))
             return
         time.sleep(1)
 

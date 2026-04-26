@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from urllib.error import HTTPError
 from unittest.mock import patch
 
 from django.test import Client, TestCase, override_settings
@@ -23,6 +24,16 @@ class FakeLlamaResponse:
         yield b'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n\n'
         yield b'data: {"choices":[{"delta":{"content":" world"},"finish_reason":null}]}\n\n'
         yield b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+
+
+def fake_http_503() -> HTTPError:
+    return HTTPError(
+        url="http://127.0.0.1:8080/v1/chat/completions",
+        code=503,
+        msg="Service Unavailable",
+        hdrs={},
+        fp=None,
+    )
 
 
 @override_settings(ALLOWED_HOSTS=["testserver", "127.0.0.1", "localhost"])
@@ -343,3 +354,12 @@ class ApiSmokeTests(TestCase):
         self.assertEqual(payload["messages"][2]["role"], "user")
         self.assertEqual(payload["messages"][2]["content"], "Say hello")
         self.assertIn("same language", payload["messages"][0]["content"])
+
+    @patch("time.sleep", return_value=None)
+    def test_llamacpp_stream_retries_503_until_ready(self, _sleep) -> None:
+        with patch("urllib.request.urlopen", side_effect=[fake_http_503(), FakeLlamaResponse()]) as urlopen:
+            with override_settings(TTD_LLAMA_READY_TIMEOUT_SECONDS=10):
+                tokens = list(stream_llamacpp("Привет", "instant", "test-model", ""))
+
+        self.assertEqual("".join(tokens), "Hello world")
+        self.assertEqual(urlopen.call_count, 2)
