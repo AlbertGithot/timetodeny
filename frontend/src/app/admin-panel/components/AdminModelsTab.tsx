@@ -65,6 +65,12 @@ interface ModelsResponse {
   models: ModelEntry[];
 }
 
+interface ImportLocalResponse {
+  ok: boolean;
+  models: ModelEntry[];
+  modelDir: string;
+}
+
 interface ModelResponse {
   ok: boolean;
   model: ModelEntry;
@@ -293,6 +299,17 @@ export default function AdminModelsTab() {
       toast.error(error instanceof Error ? error.message : 'Runtime restart failed');
     } finally {
       setRuntimeBusy(false);
+    }
+  };
+
+  const handleImportLocal = async () => {
+    try {
+      const payload = await postJson<ImportLocalResponse>('/models/import-local', {}, true);
+      setModels(payload.models);
+      loadRuntime();
+      toast.success(`Synced ${payload.models.length} local model(s) from ${payload.modelDir}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Local import failed');
     }
   };
 
@@ -612,6 +629,10 @@ export default function AdminModelsTab() {
         <button onClick={() => { setRegistrySearch(''); }} className="ttd-btn ttd-btn-ghost text-xs flex items-center gap-1.5 px-3 py-1">
           <Search size={11} />
           CLEAR FILTER
+        </button>
+        <button onClick={handleImportLocal} className="ttd-btn ttd-btn-cyan text-xs flex items-center gap-1.5 px-3 py-1">
+          <RefreshCw size={11} />
+          FIND LOCAL MODELS
         </button>
         <button onClick={handleHideAll} className="ttd-btn ttd-btn-ghost text-xs flex items-center gap-1.5 px-3 py-1">
           <EyeOff size={11} />

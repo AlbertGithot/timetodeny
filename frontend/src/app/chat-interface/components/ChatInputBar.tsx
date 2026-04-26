@@ -9,6 +9,7 @@ interface Props {
   value: string;
   onChange: (v: string) => void;
   onSend: (text: string, attachments: Attachment[]) => void;
+  onStop: () => void;
   isStreaming: boolean;
   mode: Mode;
   pendingAttachments: Attachment[];
@@ -16,7 +17,7 @@ interface Props {
 }
 
 export default function ChatInputBar({
-  value, onChange, onSend, isStreaming, mode, pendingAttachments, onAttachmentsChange,
+  value, onChange, onSend, onStop, isStreaming, mode, pendingAttachments, onAttachmentsChange,
 }: Props) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -147,7 +148,7 @@ export default function ChatInputBar({
 
         {/* Send/Stop button */}
         <button
-          onClick={isStreaming ? undefined : handleSubmit}
+          onClick={isStreaming ? onStop : handleSubmit}
           disabled={!isStreaming && !value.trim() && pendingAttachments.length === 0}
           className={`flex-shrink-0 w-9 h-9 flex items-center justify-center rounded-sm border transition-all duration-150 active:scale-95 ${
             isStreaming

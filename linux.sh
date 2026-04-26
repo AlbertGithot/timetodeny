@@ -21,7 +21,7 @@ LOG_DIR="${RUNTIME_DIR}/logs"
 
 ACTION="${1:-start}"
 case "$ACTION" in
-  start|stop|restart|status|logs|foreground|install-service|uninstall-service)
+  start|stop|restart|status|logs|foreground|install-service|uninstall-service|doctor|repair|nginx-config|certbot)
     shift || true
     ;;
   *)
@@ -1115,6 +1115,161 @@ uninstall_systemd_service() {
   echo "Removed ${TTD_SERVICE_NAME}.service"
 }
 
+doctor_check_command() {
+  local name="$1"
+  if command -v "$name" >/dev/null 2>&1; then
+    echo "OK   ${name}: $(command -v "$name")"
+  else
+    echo "MISS ${name}"
+  fi
+}
+
+run_doctor() {
+  ensure_runtime_dirs
+  resolve_repo_layout
+  resolve_network_config
+
+  echo "Time To Deny doctor"
+  echo "Root:              ${ROOT_DIR}"
+  echo "Backend:           ${BACKEND_DIR}"
+  echo "Frontend:          ${FRONTEND_DIR}"
+  echo "manage.py:         ${MANAGE_PY}"
+  echo "requirements.txt:  ${REQUIREMENTS_FILE}"
+  echo "Site:              ${TTD_FRONTEND_ORIGIN}"
+  echo "Models:            ${TTD_MODEL_DIR}"
+  echo "llama.cpp source:  ${LLAMA_CPP_RUNTIME_DIR}"
+  echo
+
+  doctor_check_command python3
+  doctor_check_command git
+  doctor_check_command npm
+  doctor_check_command cmake
+  doctor_check_command c++
+  doctor_check_command g++
+  doctor_check_command curl
+  doctor_check_command wget
+  echo
+
+  if [ -x ".venv/bin/python" ]; then
+    echo "OK   venv: .venv"
+    if ".venv/bin/python" -m pip --version >/dev/null 2>&1; then
+      echo "OK   pip in venv"
+    else
+      echo "MISS pip in venv"
+    fi
+  else
+    echo "MISS venv: .venv"
+  fi
+
+  if [ -f "${TTD_FRONTEND_BUILD_ROOT}/index.html" ]; then
+    echo "OK   frontend export: ${TTD_FRONTEND_BUILD_ROOT}"
+  else
+    echo "MISS frontend export: ${TTD_FRONTEND_BUILD_ROOT}"
+  fi
+
+  local model_count
+  model_count="$(find "$TTD_MODEL_DIR" -type f -name "*.gguf" 2>/dev/null | wc -l | tr -d '[:space:]')"
+  echo "INFO local GGUF models: ${model_count}"
+
+  if resolve_llama_cpp_bin >/dev/null 2>&1; then
+    echo "OK   llama-server: ${LLAMA_CPP_BIN}"
+  else
+    echo "MISS llama-server"
+  fi
+
+  for port in "$BACKEND_PORT" "$LLAMA_CPP_PORT" "$STALE_NEXT_PORT"; do
+    local listeners
+    listeners="$(port_listener_pids "$port" || true)"
+    if [ -n "$listeners" ]; then
+      echo "INFO port ${port}: occupied by ${listeners}"
+    else
+      echo "OK   port ${port}: free"
+    fi
+  done
+}
+
+run_repair() {
+  ensure_runtime_dirs
+  resolve_repo_layout
+  resolve_network_config
+  mkdir -p "$TTD_MODEL_DIR" "$LLAMA_SERVER_DIR"
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required"
+    exit 1
+  fi
+
+  if ! ensure_node_runtime; then
+    exit 1
+  fi
+
+  if [ ! -d ".venv" ]; then
+    python3 -m venv .venv || {
+      print_python_package_help
+      exit 1
+    }
+  fi
+
+  PYTHON=".venv/bin/python"
+  export PYTHON
+  ensure_python_pip "$PYTHON"
+  "$PYTHON" -m pip install --disable-pip-version-check -r "$REQUIREMENTS_FILE"
+
+  if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
+    (cd "$FRONTEND_DIR" && npm install)
+  fi
+  NEXT_BIN="${FRONTEND_DIR}/node_modules/.bin/next"
+  "$PYTHON" "$MANAGE_PY" migrate --noinput
+  "$PYTHON" "$MANAGE_PY" shell -c "from core.seed import ensure_defaults; ensure_defaults()"
+  build_frontend_release
+
+  if [ "$TTD_AUTO_BOOTSTRAP_LLAMA_CPP" = "1" ] && ! resolve_llama_cpp_bin >/dev/null 2>&1; then
+    bootstrap_llama_cpp || true
+  fi
+
+  echo "Repair finished."
+  echo "Start with: ./linux.sh restart"
+}
+
+print_nginx_config() {
+  resolve_repo_layout
+  local host="${1:-${PUBLIC_HOST:-example.com}}"
+  cat <<EOF
+server {
+    listen 80;
+    server_name ${host};
+
+    client_max_body_size 256m;
+
+    location / {
+        proxy_pass http://127.0.0.1:${BACKEND_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_buffering off;
+        proxy_read_timeout 3600;
+    }
+}
+EOF
+}
+
+run_certbot() {
+  local host="${1:-${PUBLIC_HOST:-}}"
+  if [ -z "$host" ]; then
+    echo "Usage: PUBLIC_HOST=your.domain ./linux.sh certbot"
+    echo "Or:    ./linux.sh certbot your.domain"
+    exit 1
+  fi
+  if ! command -v certbot >/dev/null 2>&1; then
+    echo "certbot is not installed. On Debian/Ubuntu:"
+    echo "  apt update && apt install -y certbot python3-certbot-nginx"
+    exit 1
+  fi
+  certbot --nginx -d "$host"
+}
+
 ensure_runtime_dirs
 
 case "$ACTION" in
@@ -1142,5 +1297,17 @@ case "$ACTION" in
     ;;
   uninstall-service)
     uninstall_systemd_service
+    ;;
+  doctor)
+    run_doctor
+    ;;
+  repair)
+    run_repair
+    ;;
+  nginx-config)
+    print_nginx_config "$@"
+    ;;
+  certbot)
+    run_certbot "$@"
     ;;
 esac

@@ -7,7 +7,7 @@ import ChatSidebar from './ChatSidebar';
 import MessageThread from './MessageThread';
 import ChatInputBar from './ChatInputBar';
 import ChatHeader from './ChatHeader';
-import { getJson, streamChat } from '@/lib/api';
+import { getJson, postJson, streamChat } from '@/lib/api';
 
 export type Mode = 'instant' | 'expert';
 
@@ -72,6 +72,7 @@ export default function ChatInterfaceClient() {
   const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
   const [chatId, setChatId] = useState<string | null>(searchParams.get('chat'));
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -128,6 +129,8 @@ export default function ChatInterfaceClient() {
     setMessages(prev => [...prev, assistantMsg]);
 
     let accumulated = '';
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       await streamChat(
         {
@@ -169,9 +172,18 @@ export default function ChatInterfaceClient() {
           onError: (error) => {
             throw new Error(error);
           },
-        }
+        },
+        controller.signal
       );
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        setMessages(prev => prev.map(m =>
+          m.id === streamingId
+            ? { ...m, content: accumulated || 'Generation stopped.', streaming: false }
+            : m
+        ));
+        return;
+      }
       const message = error instanceof Error ? error.message : 'Stream failed';
       setMessages(prev => prev.map(m =>
         m.id === streamingId
@@ -185,9 +197,20 @@ export default function ChatInterfaceClient() {
       ));
       toast.error(message);
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setIsStreaming(false);
     }
   }, [activeModel, chatId, mode]);
+
+  const handleStop = useCallback(() => {
+    abortRef.current?.abort();
+    void postJson('/chat/stop', {}).catch(() => undefined);
+    setIsStreaming(false);
+    setMessages(prev => prev.map(m =>
+      m.streaming ? { ...m, streaming: false, content: m.content || 'Generation stopped.' } : m
+    ));
+    toast('Generation stopped');
+  }, []);
 
   const handleModeChange = (newMode: Mode) => {
     setMode(newMode);
@@ -230,6 +253,7 @@ export default function ChatInterfaceClient() {
             value={inputValue}
             onChange={setInputValue}
             onSend={handleSend}
+            onStop={handleStop}
             isStreaming={isStreaming}
             mode={mode}
             pendingAttachments={pendingAttachments}

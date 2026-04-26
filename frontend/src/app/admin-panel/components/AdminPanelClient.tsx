@@ -15,6 +15,7 @@ type Tab = 'requests' | 'server' | 'models' | 'sessions';
 interface LoginResponse {
   ok: boolean;
   token: string;
+  mustChangePassword?: boolean;
   session: {
     ip: string;
     loginTime: string;
@@ -52,6 +53,9 @@ export default function AdminPanelClient() {
       setSessionIp(payload.session.ip);
       setSessionTime(payload.session.loginTime);
       toast.success(`Admin session started · IP: ${payload.session.ip}`);
+      if (payload.mustChangePassword) {
+        toast.warning('Default admin password is still active. Change it in Sessions.');
+      }
     } catch (error) {
       setLoginAttempts(prev => prev + 1);
       setPwError(`Invalid credentials (attempt ${loginAttempts + 1})`);

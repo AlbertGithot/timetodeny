@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from django.test import Client, TestCase, override_settings
 
-from .models import GeneratedFile, ModelRegistry, RequestLog
+from .models import Chat, GeneratedFile, ModelRegistry, RequestLog
 from .seed import ensure_defaults
 from .services import stream_llamacpp
 
@@ -249,14 +249,96 @@ class ApiSmokeTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["health"], "/api/health")
 
+    def test_chat_stream_rejects_oversized_prompt(self) -> None:
+        with override_settings(TTD_MAX_PROMPT_CHARS=5):
+            response = self.client.post(
+                "/api/chat/stream",
+                data=json.dumps({"message": "too long"}),
+                content_type="application/json",
+            )
+        self.assertEqual(response.status_code, 413)
+        self.assertFalse(response.json()["ok"])
+
+    def test_workspace_file_diff_rollback_and_zip(self) -> None:
+        generated_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(generated_dir.cleanup)
+        chat = Chat.objects.create(title="workspace")
+
+        with override_settings(TTD_GENERATED_DIR=Path(generated_dir.name)):
+            first = self.client.post(
+                f"/api/workspaces/{chat.id}/file",
+                data=json.dumps({"path": "app.py", "content": "print('one')\n"}),
+                content_type="application/json",
+            )
+            second = self.client.post(
+                f"/api/workspaces/{chat.id}/file",
+                data=json.dumps({"path": "app.py", "content": "print('two')\n"}),
+                content_type="application/json",
+            )
+            tree = self.client.get(f"/api/workspaces/{chat.id}")
+            diff = self.client.get(f"/api/workspaces/{chat.id}/diff?path=app.py")
+            rollback = self.client.post(
+                f"/api/workspaces/{chat.id}/rollback",
+                data=json.dumps({"path": "app.py"}),
+                content_type="application/json",
+            )
+            archive = self.client.get(f"/api/workspaces/{chat.id}/zip")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(tree.status_code, 200)
+        self.assertEqual(tree.json()["workspace"]["files"][0]["path"], "app.py")
+        self.assertEqual(diff.status_code, 200)
+        self.assertIn("-print('one')", diff.json()["diff"]["diff"])
+        self.assertIn("+print('two')", diff.json()["diff"]["diff"])
+        self.assertEqual(rollback.status_code, 200)
+        self.assertEqual(rollback.json()["file"]["content"], "print('one')\n")
+        self.assertEqual(archive.status_code, 200)
+
+    def test_admin_import_local_models_and_runtime_maintenance(self) -> None:
+        model_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(model_dir.cleanup)
+        (Path(model_dir.name) / "local-q4_k_m.gguf").write_bytes(b"gguf")
+        login = self.client.post(
+            "/api/admin/login",
+            data=json.dumps({"password": "1111"}),
+            content_type="application/json",
+        )
+        token = login.json()["token"]
+
+        with override_settings(TTD_MODEL_DIR=Path(model_dir.name)):
+            imported = self.client.post(
+                "/api/models/import-local",
+                data=json.dumps({}),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=f"Bearer {token}",
+            )
+            disk = self.client.get("/api/admin/disk", HTTP_AUTHORIZATION=f"Bearer {token}")
+            logs = self.client.get("/api/admin/logs", HTTP_AUTHORIZATION=f"Bearer {token}")
+            cleanup = self.client.post(
+                "/api/admin/cleanup",
+                data=json.dumps({"days": 7}),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=f"Bearer {token}",
+            )
+
+        self.assertEqual(imported.status_code, 200)
+        self.assertEqual(imported.json()["models"][0]["name"], "local-q4_k_m")
+        self.assertEqual(disk.status_code, 200)
+        self.assertTrue(disk.json()["entries"])
+        self.assertEqual(logs.status_code, 200)
+        self.assertEqual(cleanup.status_code, 200)
+
     @patch("urllib.request.urlopen", return_value=FakeLlamaResponse())
     def test_llamacpp_stream_parser(self, _urlopen) -> None:
-        tokens = list(stream_llamacpp("Say hello", "instant", "test-model", ""))
+        tokens = list(stream_llamacpp("Say hello", "instant", "test-model", "", history=[{"role": "user", "content": "Earlier"}]))
         self.assertEqual("".join(tokens), "Hello world")
 
         request = _urlopen.call_args.args[0]
         self.assertTrue(request.full_url.endswith("/v1/chat/completions"))
         payload = json.loads(request.data.decode("utf-8"))
         self.assertEqual(payload["messages"][1]["role"], "user")
-        self.assertEqual(payload["messages"][1]["content"], "Say hello")
+        self.assertEqual(payload["messages"][1]["content"], "Earlier")
+        self.assertEqual(payload["messages"][2]["role"], "user")
+        self.assertEqual(payload["messages"][2]["content"], "Say hello")
         self.assertIn("same language", payload["messages"][0]["content"])

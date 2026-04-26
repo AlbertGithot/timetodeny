@@ -105,11 +105,12 @@ function parseSseBlock(block: string): { event: string; data: Record<string, unk
   };
 }
 
-export async function streamChat(payload: unknown, handlers: StreamHandlers): Promise<void> {
+export async function streamChat(payload: unknown, handlers: StreamHandlers, signal?: AbortSignal): Promise<void> {
   const response = await fetch(apiUrl('/chat/stream'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    signal,
   });
 
   if (!response.ok || !response.body) {

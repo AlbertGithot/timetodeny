@@ -11,7 +11,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import psutil
 from django.conf import settings
@@ -223,11 +223,16 @@ def test_generated_file(path: Path, language: str) -> tuple[bool, str]:
     return True, "File write smoke check: OK"
 
 
-def create_code_artifact(prompt: str) -> tuple[ArtifactDraft, bool, str]:
+def create_code_artifact(prompt: str, chat_id: str | None = None) -> tuple[ArtifactDraft, bool, str]:
     name, language = infer_file(prompt)
     content = build_code(prompt, name, language)
-    disk_name = f"{uuid.uuid4().hex}_{safe_filename(name, 'generated.txt')}"
-    disk_path = generated_dir("files") / disk_name
+    if chat_id:
+        from .workspaces import write_workspace_file
+
+        disk_path = write_workspace_file(chat_id, name, content)
+    else:
+        disk_name = f"{uuid.uuid4().hex}_{safe_filename(name, 'generated.txt')}"
+        disk_path = generated_dir("files") / disk_name
     disk_path.write_text(content, encoding="utf-8")
     passed, output = test_generated_file(disk_path, language)
     return ArtifactDraft(name=name, language=language, content=content, file_type="code", disk_path=str(disk_path)), passed, output
@@ -282,7 +287,14 @@ def mock_text_response(prompt: str, mode: str, model_name: str, attachment_count
     )
 
 
-def build_local_draft(prompt: str, mode: str, model_name: str, public_image_base: str, attachment_count: int = 0) -> ResponseDraft:
+def build_local_draft(
+    prompt: str,
+    mode: str,
+    model_name: str,
+    public_image_base: str,
+    attachment_count: int = 0,
+    chat_id: str | None = None,
+) -> ResponseDraft:
     thinking = ""
     if mode == "expert":
         thinking = "Analyzing request...\nChecking whether files or images are needed...\nPreparing persistent artifacts and tests..."
@@ -298,7 +310,7 @@ def build_local_draft(prompt: str, mode: str, model_name: str, public_image_base
         )
 
     if wants_file(prompt):
-        file, passed, output = create_code_artifact(prompt)
+        file, passed, output = create_code_artifact(prompt, chat_id=chat_id)
         return ResponseDraft(
             content=f"Создал файл `{file.name}`. Содержимое показано ниже, тест/проверка уже выполнены.",
             thinking=thinking,
@@ -315,7 +327,34 @@ def chunk_text(text: str, size: int = 16) -> Iterable[str]:
         yield text[idx : idx + size]
 
 
-def llama_cpp_system_prompt(mode: str, system_prompt: str = "") -> str:
+def likely_russian(text: str) -> bool:
+    cyrillic = sum(1 for char in text if "а" <= char.lower() <= "я" or char.lower() == "ё")
+    return cyrillic >= 2
+
+
+def language_guard(prompt: str) -> str:
+    if likely_russian(prompt):
+        return (
+            "The latest user message is Russian. Answer in Russian only, unless the user explicitly asks for another "
+            "language. Do not output unrelated transliterated words, Malay, Indonesian, Turkish, Lezgian, or filler."
+        )
+    return "Answer in the same language as the latest user message."
+
+
+def looks_like_language_drift(prompt: str, response: str) -> bool:
+    if not likely_russian(prompt):
+        return False
+    stripped = response.strip()
+    if len(stripped) < 12:
+        return False
+    if "```" in stripped:
+        return False
+    cyrillic = sum(1 for char in stripped if "а" <= char.lower() <= "я" or char.lower() == "ё")
+    latin = sum(1 for char in stripped if "a" <= char.lower() <= "z")
+    return cyrillic == 0 and latin >= 6
+
+
+def llama_cpp_system_prompt(mode: str, system_prompt: str = "", latest_prompt: str = "") -> str:
     system = system_prompt.strip() or (
         "You are Time To Deny, a local AI assistant powered by llama.cpp. "
         "Answer clearly, stream useful output, and prefer runnable code when asked. "
@@ -327,6 +366,8 @@ def llama_cpp_system_prompt(mode: str, system_prompt: str = "") -> str:
         system += "\nUse careful reasoning internally, then provide a direct final answer."
     else:
         system += "\nAnswer directly and keep latency low."
+    if latest_prompt:
+        system += f"\n{language_guard(latest_prompt)}"
     return system
 
 
@@ -354,18 +395,45 @@ def is_llamacpp_done(item: dict) -> bool:
     return False
 
 
-def stream_llamacpp(prompt: str, mode: str, model_name: str, system_prompt: str = "") -> Iterable[str]:
-    payload = {
+def normalize_history(history: list[dict[str, str]] | None) -> list[dict[str, str]]:
+    if not history:
+        return []
+    normalized: list[dict[str, str]] = []
+    for item in history[-settings.TTD_CHAT_CONTEXT_MESSAGES :]:
+        role = item.get("role", "")
+        content = (item.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        normalized.append({"role": role, "content": content[:4000]})
+    return normalized
+
+
+def _llamacpp_payload(
+    prompt: str,
+    mode: str,
+    model_name: str,
+    system_prompt: str = "",
+    history: list[dict[str, str]] | None = None,
+    extra_guard: str = "",
+) -> dict:
+    system = llama_cpp_system_prompt(mode, system_prompt, prompt)
+    if extra_guard:
+        system += f"\n{extra_guard}"
+    return {
         "model": model_name,
         "messages": [
-            {"role": "system", "content": llama_cpp_system_prompt(mode, system_prompt)},
+            {"role": "system", "content": system},
+            *normalize_history(history),
             {"role": "user", "content": prompt.strip()},
         ],
         "stream": True,
-        "temperature": 0.15 if mode == "expert" else 0.25,
-        "top_p": 0.9,
+        "temperature": 0.12 if mode == "expert" else 0.18,
+        "top_p": 0.88,
         "max_tokens": settings.TTD_LLAMA_CPP_N_PREDICT,
     }
+
+
+def _iter_llamacpp_tokens(payload: dict, stop_checker: Callable[[], None] | None = None) -> Iterable[str]:
     req = urllib.request.Request(
         f"{settings.TTD_LLAMA_CPP_URL.rstrip('/')}/v1/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -375,6 +443,8 @@ def stream_llamacpp(prompt: str, mode: str, model_name: str, system_prompt: str 
     try:
         with urllib.request.urlopen(req, timeout=settings.TTD_REQUEST_TIMEOUT_SECONDS) as response:
             for raw in response:
+                if stop_checker:
+                    stop_checker()
                 if not raw:
                     continue
                 line = raw.decode("utf-8").strip()
@@ -394,6 +464,52 @@ def stream_llamacpp(prompt: str, mode: str, model_name: str, system_prompt: str 
         raise RuntimeError(
             f"llama.cpp backend unavailable: {exc}. Start llama-server or switch TTD_MODEL_BACKEND=mock for UI-only dev."
         ) from exc
+
+
+def stream_llamacpp(
+    prompt: str,
+    mode: str,
+    model_name: str,
+    system_prompt: str = "",
+    history: list[dict[str, str]] | None = None,
+    stop_checker: Callable[[], None] | None = None,
+) -> Iterable[str]:
+    payload = _llamacpp_payload(prompt, mode, model_name, system_prompt, history)
+    token_iter = _iter_llamacpp_tokens(payload, stop_checker=stop_checker)
+    initial_tokens: list[str] = []
+    initial_text = ""
+
+    for token in token_iter:
+        initial_tokens.append(token)
+        initial_text += token
+        if len(initial_text.strip()) >= 80 or len(initial_tokens) >= 8:
+            break
+
+    if looks_like_language_drift(prompt, initial_text):
+        retry_payload = _llamacpp_payload(
+            prompt,
+            mode,
+            model_name,
+            system_prompt,
+            history,
+            "Previous answer drifted into the wrong language. Retry once and answer in clean Russian only.",
+        )
+        token_iter = _iter_llamacpp_tokens(retry_payload, stop_checker=stop_checker)
+        initial_tokens = []
+        for token in token_iter:
+            initial_tokens.append(token)
+            if len("".join(initial_tokens).strip()) >= 80 or len(initial_tokens) >= 8:
+                break
+
+    for token in initial_tokens:
+        if stop_checker:
+            stop_checker()
+        yield token
+
+    for token in token_iter:
+        if stop_checker:
+            stop_checker()
+        yield token
 
 
 def system_snapshot(interval: str) -> dict:

@@ -13,6 +13,9 @@ Next.js chat UI with a Django/Python backend for local AI workflows.
 - HuggingFace GGUF model search in the admin registry with one-click install form fill.
 - SQLite for local development, MySQL via environment variables.
 - llama.cpp integration through `llama-server` and GGUF models.
+- Chat queueing, stop generation, context history, input/attachment limits, and a Russian-language guard against random language drift.
+- Per-chat workspace API for generated files: tree, read/write, zip download, diff, and rollback.
+- Admin maintenance endpoints for runtime logs, disk usage, cleanup, SQLite backup, and local GGUF import.
 
 ## Branch
 
@@ -90,6 +93,10 @@ Useful launcher commands:
 ./linux.sh status
 ./linux.sh logs
 ./linux.sh foreground
+./linux.sh doctor
+./linux.sh repair
+./linux.sh nginx-config your.domain
+./linux.sh certbot your.domain
 ./linux.sh install-service
 ./linux.sh uninstall-service
 ```
@@ -118,6 +125,20 @@ journalctl -u timetodeny.service -f
 ```
 
 The admin model registry includes a llama.cpp runtime health panel with selected model path, PID, port state, last log lines, and a restart button.
+`./linux.sh doctor` prints missing system dependencies, occupied ports, model count, frontend export state, and llama-server discovery. `./linux.sh repair` recreates the runtime basics, installs dependencies, runs migrations, rebuilds the frontend export, and tries to build llama.cpp if the toolchain exists.
+
+For nginx, generate a single-port reverse proxy config:
+
+```bash
+./linux.sh nginx-config your.domain
+```
+
+Then install it into nginx however you normally manage `/etc/nginx/sites-available`. HTTPS helper:
+
+```bash
+apt install -y certbot python3-certbot-nginx
+./linux.sh certbot your.domain
+```
 
 ## Manual Backend
 
@@ -184,6 +205,12 @@ Useful llama.cpp env vars:
 - `LLAMA_CPP_THREADS`: optional thread count.
 - `LLAMA_CPP_GPU_LAYERS`: optional GPU layer count.
 - `TTD_LLAMA_CPP_N_PREDICT`: max generated tokens per request, default `1024`.
+- `TTD_MAX_PROMPT_CHARS`: prompt limit, default `12000`.
+- `TTD_MAX_ATTACHMENTS`: attachment count limit, default `8`.
+- `TTD_MAX_ATTACHMENT_CHARS`: per-attachment text/data limit, default `250000`.
+- `TTD_CHAT_CONTEXT_MESSAGES`: previous chat messages sent to llama.cpp, default `12`.
+- `TTD_ADMIN_SESSION_TTL_SECONDS`: admin session TTL, default `86400`.
+- `TTD_LOGIN_RATE_LIMIT_ATTEMPTS`: failed login attempts before cooldown, default `5`.
 
 `mock` remains available for UI/backend smoke tests, because debugging CSS while waiting for a 14B model to wake up is punishment, not engineering.
 

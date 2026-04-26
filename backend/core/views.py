@@ -15,6 +15,7 @@ from django.http import FileResponse, HttpRequest, HttpResponse, StreamingHttpRe
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
+from .chat_runtime import GenerationStopped, generation_slot, queue_status, raise_if_generation_stopped, request_generation_stop
 from .llama_runtime import ensure_llama_server, llama_runtime_status, restart_llama_server, stop_managed_llama
 from .model_registry import delete_local_model_file, file_size_label, sync_model_registry_with_files
 from .models import AdminSession, AdminSetting, Attachment, Chat, GeneratedFile, Message, ModelRegistry, RequestLog
@@ -38,6 +39,19 @@ from .services import (
     wants_image,
 )
 from .utils import client_ip, json_response, log_admin_action, make_token, parse_json, require_admin, sse, user_agent
+from .workspaces import (
+    cleanup_old_workspaces,
+    create_workspace_zip,
+    diff_workspace_file,
+    directory_size,
+    list_workspace_tree,
+    read_workspace_file,
+    rollback_workspace_file,
+    write_workspace_file,
+)
+
+
+_LOGIN_FAILURES: dict[str, list[float]] = {}
 
 
 def index(request: HttpRequest):
@@ -226,6 +240,45 @@ def chat_detail(request: HttpRequest, chat_id: UUID):
     return json_response({"ok": False, "error": "Method not allowed"}, status=405)
 
 
+def normalize_chat_attachments(raw: object) -> tuple[list[dict], str | None]:
+    if raw is None:
+        return [], None
+    if not isinstance(raw, list):
+        return [], "attachments must be a list"
+    if len(raw) > settings.TTD_MAX_ATTACHMENTS:
+        return [], f"too many attachments (max {settings.TTD_MAX_ATTACHMENTS})"
+
+    attachments: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return [], "attachment must be an object"
+        content = str(item.get("content") or "")
+        if len(content) > settings.TTD_MAX_ATTACHMENT_CHARS:
+            return [], f"attachment {item.get('name') or 'file'} is too large"
+        attachments.append(
+            {
+                "name": str(item.get("name") or "attachment")[:255],
+                "type": str(item.get("type") or "file")[:24],
+                "size": str(item.get("size") or "")[:64],
+                "content": content,
+            }
+        )
+    return attachments, None
+
+
+def chat_context(chat: Chat, current_message_id: UUID) -> list[dict[str, str]]:
+    limit = max(0, settings.TTD_CHAT_CONTEXT_MESSAGES)
+    if limit == 0:
+        return []
+    messages = (
+        chat.messages.exclude(id=current_message_id)
+        .exclude(content="")
+        .filter(role__in=["user", "assistant"])
+        .order_by("-created_at")[:limit]
+    )
+    return [{"role": msg.role, "content": msg.content} for msg in reversed(list(messages))]
+
+
 @csrf_exempt
 def chat_stream(request: HttpRequest):
     ensure_defaults()
@@ -233,10 +286,20 @@ def chat_stream(request: HttpRequest):
         return json_response({"ok": False, "error": "Method not allowed"}, status=405)
 
     data = parse_json(request)
-    prompt = data.get("message") or ""
+    prompt = str(data.get("message") or "")
+    if len(prompt) > settings.TTD_MAX_PROMPT_CHARS:
+        return json_response({"ok": False, "error": f"prompt is too long (max {settings.TTD_MAX_PROMPT_CHARS} chars)"}, status=413)
     mode = data.get("mode") or "instant"
     model_name = data.get("model") or selected_model_name()
-    attachments = data.get("attachments") or []
+    attachments, attachment_error = normalize_chat_attachments(data.get("attachments") or [])
+    if attachment_error:
+        return json_response({"ok": False, "error": attachment_error}, status=413)
+    sync_model_registry_with_files()
+    selected_model = ModelRegistry.objects.filter(name=model_name, status="ready").first()
+    if not selected_model:
+        selected_model = ModelRegistry.objects.filter(selected=True, status="ready").first()
+    if selected_model:
+        model_name = selected_model.name
     started = time.monotonic()
 
     chat = get_or_create_chat(data.get("chatId"), prompt, mode, model_name)
@@ -266,13 +329,15 @@ def chat_stream(request: HttpRequest):
         chat.title = title_from_prompt(prompt)
     chat.save(update_fields=["mode", "active_model", "title", "updated_at"])
 
-    selected = ModelRegistry.objects.filter(name=model_name).first()
+    selected = selected_model or ModelRegistry.objects.filter(name=model_name).first()
     system_prompt = selected.system_prompt if selected else ""
+    history = chat_context(chat, user_msg.id)
 
     def generate():
         content = ""
         token_count = 0
         try:
+            queued = queue_status()["busy"]
             yield sse(
                 "meta",
                 {
@@ -280,38 +345,60 @@ def chat_stream(request: HttpRequest):
                     "userMessageId": str(user_msg.id),
                     "assistantMessageId": str(assistant.id),
                     "ts": timezone.localtime(assistant.created_at).strftime("%H:%M:%S"),
+                    "queued": queued,
                 },
             )
+            if queued:
+                yield sse("thinking", {"text": "Запрос поставлен в очередь локальной модели. Ждем, пока текущая генерация освободит llama.cpp."})
 
             use_llamacpp = settings.TTD_MODEL_BACKEND in {"llamacpp", "llama.cpp"} and not wants_file(prompt) and not wants_image(prompt)
-            if use_llamacpp:
-                ensure_llama_server(selected)
-                for token in stream_llamacpp(prompt, mode, model_name, system_prompt):
-                    content += token
-                    token_count += max(1, len(token.split()))
-                    yield sse("token", {"text": token})
-            else:
-                public_image_base = request.build_absolute_uri(f"{settings.MEDIA_URL}generated/images/")
-                draft = build_local_draft(prompt, mode, model_name, public_image_base, len(attachments))
-                if draft.thinking:
-                    assistant.thinking = draft.thinking
-                    yield sse("thinking", {"text": draft.thinking})
-                for token in chunk_text(draft.content):
-                    content += token
-                    yield sse("token", {"text": token})
-                    time.sleep(0.015)
-                token_count = draft.tokens
-                assistant.test_passed = draft.test_passed
-                assistant.test_output = draft.test_output
-                for file in draft.files:
-                    GeneratedFile.objects.create(
-                        message=assistant,
-                        name=file.name,
-                        language=file.language,
-                        content=file.content,
-                        file_type=file.file_type,
-                        disk_path=file.disk_path,
+            with generation_slot(str(chat.id)) as slot:
+                if slot["waitSeconds"] > 0.05:
+                    yield sse("thinking", {"text": f"Очередь прошла за {slot['waitSeconds']:.1f}s. Генерация началась."})
+
+                if use_llamacpp:
+                    ensure_llama_server(selected)
+                    for token in stream_llamacpp(
+                        prompt,
+                        mode,
+                        model_name,
+                        system_prompt,
+                        history=history,
+                        stop_checker=raise_if_generation_stopped,
+                    ):
+                        content += token
+                        token_count += max(1, len(token.split()))
+                        yield sse("token", {"text": token})
+                else:
+                    public_image_base = request.build_absolute_uri(f"{settings.MEDIA_URL}generated/images/")
+                    draft = build_local_draft(
+                        prompt,
+                        mode,
+                        model_name,
+                        public_image_base,
+                        len(attachments),
+                        chat_id=str(chat.id),
                     )
+                    if draft.thinking:
+                        assistant.thinking = draft.thinking
+                        yield sse("thinking", {"text": draft.thinking})
+                    for token in chunk_text(draft.content):
+                        raise_if_generation_stopped()
+                        content += token
+                        yield sse("token", {"text": token})
+                        time.sleep(0.015)
+                    token_count = draft.tokens
+                    assistant.test_passed = draft.test_passed
+                    assistant.test_output = draft.test_output
+                    for file in draft.files:
+                        GeneratedFile.objects.create(
+                            message=assistant,
+                            name=file.name,
+                            language=file.language,
+                            content=file.content,
+                            file_type=file.file_type,
+                            disk_path=file.disk_path,
+                        )
 
             elapsed = max(0.001, time.monotonic() - started)
             assistant.content = content
@@ -328,6 +415,20 @@ def chat_stream(request: HttpRequest):
             chat.save(update_fields=["updated_at"])
             saved = Message.objects.prefetch_related("attachments", "generated_files").get(id=assistant.id)
             yield sse("done", {"message": message_to_dict(saved), "chat": chat_to_summary(chat)})
+        except GenerationStopped as exc:
+            elapsed = max(0.001, time.monotonic() - started)
+            log.status = "error"
+            log.error_details = str(exc)
+            log.latency_ms = int(elapsed * 1000)
+            log.response = content
+            log.tokens = token_count
+            log.save()
+            assistant.content = content or "Generation stopped."
+            assistant.total_tokens = token_count
+            assistant.test_passed = False
+            assistant.test_output = str(exc)
+            assistant.save()
+            yield sse("error", {"error": str(exc)})
         except Exception as exc:
             elapsed = max(0.001, time.monotonic() - started)
             log.status = "error"
@@ -344,6 +445,15 @@ def chat_stream(request: HttpRequest):
     response["Cache-Control"] = "no-cache"
     response["X-Accel-Buffering"] = "no"
     return response
+
+
+@csrf_exempt
+def chat_stop(request: HttpRequest):
+    if request.method != "POST":
+        return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+    request_generation_stop()
+    stop_managed_llama()
+    return json_response({"ok": True, "queue": queue_status()})
 
 
 def selected_model_name() -> str:
@@ -493,6 +603,18 @@ def model_install(request: HttpRequest):
 
 
 @csrf_exempt
+def models_import_local(request: HttpRequest):
+    session, error = require_admin(request)
+    if error:
+        return error
+    if request.method != "POST":
+        return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+    models = [model_to_dict(model) for model in sync_model_registry_with_files()]
+    log_admin_action(request, f"Imported local GGUF models from {settings.TTD_MODEL_DIR}", session)
+    return json_response({"ok": True, "models": models, "modelDir": str(settings.TTD_MODEL_DIR)})
+
+
+@csrf_exempt
 def model_action(request: HttpRequest, model_id: UUID, action: str):
     session, error = require_admin(request)
     if error:
@@ -621,6 +743,26 @@ def models_runtime_restart(request: HttpRequest):
     return json_response({"ok": True, "runtime": runtime})
 
 
+def login_rate_limited(ip: str) -> tuple[bool, int]:
+    now = time.monotonic()
+    window = settings.TTD_LOGIN_RATE_LIMIT_WINDOW_SECONDS
+    attempts = _LOGIN_FAILURES.get(ip, [])
+    attempts = [stamp for stamp in attempts if now - stamp < window]
+    _LOGIN_FAILURES[ip] = attempts
+    remaining = max(0, settings.TTD_LOGIN_RATE_LIMIT_ATTEMPTS - len(attempts))
+    return remaining == 0, remaining
+
+
+def record_login_failure(ip: str) -> None:
+    now = time.monotonic()
+    attempts = _LOGIN_FAILURES.setdefault(ip, [])
+    attempts.append(now)
+
+
+def clear_login_failures(ip: str) -> None:
+    _LOGIN_FAILURES.pop(ip, None)
+
+
 @csrf_exempt
 def admin_login(request: HttpRequest):
     ensure_defaults()
@@ -628,10 +770,15 @@ def admin_login(request: HttpRequest):
         return json_response({"ok": False, "error": "Method not allowed"}, status=405)
     data = parse_json(request)
     password = data.get("password") or ""
+    ip = client_ip(request)
+    limited, _remaining = login_rate_limited(ip)
+    if limited:
+        return json_response({"ok": False, "error": "Too many failed attempts. Wait a few minutes."}, status=429)
     setting = AdminSetting.objects.filter(key="admin_password").first()
     if not setting or not check_password(password, setting.value):
+        record_login_failure(ip)
         RequestLog.objects.create(
-            ip=client_ip(request),
+            ip=ip,
             user_agent=user_agent(request),
             model="admin",
             mode="auth",
@@ -642,9 +789,17 @@ def admin_login(request: HttpRequest):
         )
         return json_response({"ok": False, "error": "Invalid credentials"}, status=401)
 
-    session = AdminSession.objects.create(token=make_token(), ip=client_ip(request), user_agent=user_agent(request))
+    clear_login_failures(ip)
+    session = AdminSession.objects.create(token=make_token(), ip=ip, user_agent=user_agent(request))
     log_admin_action(request, "Authenticated successfully", session)
-    return json_response({"ok": True, "token": session.token, "session": session_to_dict(session)})
+    return json_response(
+        {
+            "ok": True,
+            "token": session.token,
+            "session": session_to_dict(session),
+            "mustChangePassword": check_password("1111", setting.value),
+        }
+    )
 
 
 @csrf_exempt
@@ -736,6 +891,115 @@ def admin_server(request: HttpRequest):
     return json_response({"ok": True, **system_snapshot(interval)})
 
 
+def bytes_label(value: int) -> str:
+    if value >= 1024**3:
+        return f"{value / (1024**3):.2f}GB"
+    if value >= 1024**2:
+        return f"{value / (1024**2):.1f}MB"
+    if value >= 1024:
+        return f"{value / 1024:.1f}KB"
+    return f"{value}B"
+
+
+def runtime_log_paths() -> dict[str, Path]:
+    log_dir = Path(settings.PROJECT_ROOT) / ".runtime" / "logs"
+    return {
+        "backend": log_dir / "backend.log",
+        "frontend": log_dir / "frontend.log",
+        "llama": log_dir / "llama.log",
+    }
+
+
+def tail_file(path: Path, lines: int) -> str:
+    try:
+        return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
+    except OSError:
+        return ""
+
+
+def admin_logs(request: HttpRequest):
+    session, error = require_admin(request)
+    if error:
+        return error
+    service = (request.GET.get("service") or "all").lower()
+    try:
+        lines = max(20, min(1000, int(request.GET.get("lines") or settings.TTD_LOG_TAIL_LINES)))
+    except ValueError:
+        lines = settings.TTD_LOG_TAIL_LINES
+
+    paths = runtime_log_paths()
+    if service != "all":
+        paths = {service: paths[service]} if service in paths else {}
+    logs = {
+        name: {"path": str(path), "content": tail_file(path, lines), "exists": path.is_file()}
+        for name, path in paths.items()
+    }
+    log_admin_action(request, f"Viewed runtime logs ({service})", session)
+    return json_response({"ok": True, "logs": logs})
+
+
+def admin_disk(request: HttpRequest):
+    session, error = require_admin(request)
+    if error:
+        return error
+    db_name = settings.DATABASES["default"].get("NAME")
+    paths = {
+        "project": Path(settings.PROJECT_ROOT),
+        "models": Path(settings.TTD_MODEL_DIR),
+        "generated": Path(settings.TTD_GENERATED_DIR),
+        "media": Path(settings.MEDIA_ROOT),
+        "logs": Path(settings.PROJECT_ROOT) / ".runtime" / "logs",
+        "llamaSource": Path(settings.PROJECT_ROOT) / "llamaserver",
+    }
+    if db_name:
+        paths["database"] = Path(db_name)
+    entries = []
+    for name, path in paths.items():
+        size = directory_size(path) if path.exists() else 0
+        entries.append({"name": name, "path": str(path), "exists": path.exists(), "bytes": size, "size": bytes_label(size)})
+    log_admin_action(request, "Viewed disk usage", session)
+    return json_response({"ok": True, "entries": entries})
+
+
+@csrf_exempt
+def admin_cleanup(request: HttpRequest):
+    session, error = require_admin(request)
+    if error:
+        return error
+    if request.method != "POST":
+        return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+    data = parse_json(request)
+    days = int(data.get("days") or 7)
+    truncate_logs = bool_from_payload(data.get("truncateLogs"), default=False)
+    result = cleanup_old_workspaces(days)
+    truncated = []
+    if truncate_logs:
+        for name, path in runtime_log_paths().items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                path.write_text("", encoding="utf-8")
+                truncated.append(name)
+            except OSError:
+                pass
+    log_admin_action(request, f"Cleanup completed: {result['removed']} workspaces removed", session)
+    return json_response({"ok": True, "cleanup": result, "truncatedLogs": truncated})
+
+
+def admin_backup(request: HttpRequest):
+    session, error = require_admin(request)
+    if error:
+        return error
+    engine = settings.DATABASES["default"].get("ENGINE", "")
+    db_name = settings.DATABASES["default"].get("NAME")
+    if "sqlite3" not in engine or not db_name:
+        return json_response({"ok": False, "error": "Automatic DB file backup is only available for SQLite."}, status=501)
+    db_path = Path(db_name)
+    if not db_path.is_file():
+        return json_response({"ok": False, "error": "Database file not found"}, status=404)
+    log_admin_action(request, "Downloaded SQLite backup", session)
+    return FileResponse(open(db_path, "rb"), as_attachment=True, filename=f"ttd-db-{int(time.time())}.sqlite3")
+
+
 def admin_sessions(request: HttpRequest):
     session, error = require_admin(request)
     if error:
@@ -743,3 +1007,68 @@ def admin_sessions(request: HttpRequest):
     log_admin_action(request, "Viewed Sessions tab", session)
     sessions = [session_to_dict(item) for item in AdminSession.objects.prefetch_related("actions").all()[:250]]
     return json_response({"ok": True, "sessions": sessions})
+
+
+@csrf_exempt
+def workspace_detail(request: HttpRequest, chat_id: UUID):
+    if request.method != "GET":
+        return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+    if not Chat.objects.filter(id=chat_id).exists():
+        return json_response({"ok": False, "error": "Chat not found"}, status=404)
+    return json_response({"ok": True, "workspace": list_workspace_tree(chat_id)})
+
+
+@csrf_exempt
+def workspace_file(request: HttpRequest, chat_id: UUID):
+    if not Chat.objects.filter(id=chat_id).exists():
+        return json_response({"ok": False, "error": "Chat not found"}, status=404)
+    if request.method == "GET":
+        path = request.GET.get("path") or ""
+        try:
+            return json_response({"ok": True, "file": read_workspace_file(chat_id, path)})
+        except FileNotFoundError:
+            return json_response({"ok": False, "error": "File not found"}, status=404)
+        except ValueError as exc:
+            return json_response({"ok": False, "error": str(exc)}, status=400)
+    if request.method == "POST":
+        data = parse_json(request)
+        relative_path = data.get("path") or ""
+        try:
+            write_workspace_file(chat_id, relative_path, data.get("content") or "")
+            return json_response({"ok": True, "file": read_workspace_file(chat_id, relative_path)})
+        except ValueError as exc:
+            return json_response({"ok": False, "error": str(exc)}, status=400)
+    return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+
+
+def workspace_zip(request: HttpRequest, chat_id: UUID):
+    if not Chat.objects.filter(id=chat_id).exists():
+        return json_response({"ok": False, "error": "Chat not found"}, status=404)
+    archive = create_workspace_zip(chat_id)
+    return FileResponse(open(archive, "rb"), as_attachment=True, filename=archive.name)
+
+
+def workspace_diff(request: HttpRequest, chat_id: UUID):
+    if not Chat.objects.filter(id=chat_id).exists():
+        return json_response({"ok": False, "error": "Chat not found"}, status=404)
+    try:
+        return json_response({"ok": True, "diff": diff_workspace_file(chat_id, request.GET.get("path") or "")})
+    except FileNotFoundError:
+        return json_response({"ok": False, "error": "File/version not found"}, status=404)
+    except ValueError as exc:
+        return json_response({"ok": False, "error": str(exc)}, status=400)
+
+
+@csrf_exempt
+def workspace_rollback(request: HttpRequest, chat_id: UUID):
+    if request.method != "POST":
+        return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+    if not Chat.objects.filter(id=chat_id).exists():
+        return json_response({"ok": False, "error": "Chat not found"}, status=404)
+    data = parse_json(request)
+    try:
+        return json_response({"ok": True, "file": rollback_workspace_file(chat_id, data.get("path") or "")})
+    except FileNotFoundError:
+        return json_response({"ok": False, "error": "Previous version not found"}, status=404)
+    except ValueError as exc:
+        return json_response({"ok": False, "error": str(exc)}, status=400)
