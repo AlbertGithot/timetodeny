@@ -45,7 +45,7 @@ export default function ChatInputBar({
       if (file.type.startsWith('image/')) {
         reader.readAsDataURL(file);
       } else {
-        reader.readAsText(file.slice(0, 256 * 1024));
+        reader.readAsText(file);
       }
     })
   );
@@ -69,7 +69,6 @@ export default function ChatInputBar({
   };
 
   const charCount = value.length;
-  const isNearLimit = charCount > 3500;
 
   return (
     <div className="flex-shrink-0 border-t border-ttd-border bg-ttd-surface/80 backdrop-blur-sm">
@@ -141,7 +140,7 @@ export default function ChatInputBar({
             }}
           />
           {/* Char count */}
-          <span className={`absolute bottom-2 right-2 text-[9px] ${isNearLimit ? 'text-ttd-amber' : 'text-ttd-dim'}`}>
+          <span className="absolute bottom-2 right-2 text-[9px] text-ttd-dim">
             {charCount > 0 ? `${charCount}` : ''}
           </span>
         </div>

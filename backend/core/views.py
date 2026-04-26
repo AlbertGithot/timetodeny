@@ -245,7 +245,7 @@ def normalize_chat_attachments(raw: object) -> tuple[list[dict], str | None]:
         return [], None
     if not isinstance(raw, list):
         return [], "attachments must be a list"
-    if len(raw) > settings.TTD_MAX_ATTACHMENTS:
+    if settings.TTD_MAX_ATTACHMENTS > 0 and len(raw) > settings.TTD_MAX_ATTACHMENTS:
         return [], f"too many attachments (max {settings.TTD_MAX_ATTACHMENTS})"
 
     attachments: list[dict] = []
@@ -253,7 +253,7 @@ def normalize_chat_attachments(raw: object) -> tuple[list[dict], str | None]:
         if not isinstance(item, dict):
             return [], "attachment must be an object"
         content = str(item.get("content") or "")
-        if len(content) > settings.TTD_MAX_ATTACHMENT_CHARS:
+        if settings.TTD_MAX_ATTACHMENT_CHARS > 0 and len(content) > settings.TTD_MAX_ATTACHMENT_CHARS:
             return [], f"attachment {item.get('name') or 'file'} is too large"
         attachments.append(
             {
@@ -287,7 +287,7 @@ def chat_stream(request: HttpRequest):
 
     data = parse_json(request)
     prompt = str(data.get("message") or "")
-    if len(prompt) > settings.TTD_MAX_PROMPT_CHARS:
+    if settings.TTD_MAX_PROMPT_CHARS > 0 and len(prompt) > settings.TTD_MAX_PROMPT_CHARS:
         return json_response({"ok": False, "error": f"prompt is too long (max {settings.TTD_MAX_PROMPT_CHARS} chars)"}, status=413)
     mode = data.get("mode") or "instant"
     model_name = data.get("model") or selected_model_name()

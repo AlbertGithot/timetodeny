@@ -60,7 +60,7 @@ def save_version(chat_id: str | UUID, relative_path: str, path: Path) -> Path | 
 
 def write_workspace_file(chat_id: str | UUID, relative_path: str, content: str) -> Path:
     encoded = content.encode("utf-8")
-    if len(encoded) > settings.TTD_WORKSPACE_MAX_FILE_BYTES:
+    if settings.TTD_WORKSPACE_MAX_FILE_BYTES > 0 and len(encoded) > settings.TTD_WORKSPACE_MAX_FILE_BYTES:
         raise ValueError(f"file is too large ({len(encoded)} bytes)")
     path = safe_workspace_path(chat_id, relative_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -74,7 +74,7 @@ def read_workspace_file(chat_id: str | UUID, relative_path: str) -> dict:
     if not path.is_file():
         raise FileNotFoundError(relative_path)
     size = path.stat().st_size
-    if size > settings.TTD_WORKSPACE_MAX_FILE_BYTES:
+    if settings.TTD_WORKSPACE_MAX_FILE_BYTES > 0 and size > settings.TTD_WORKSPACE_MAX_FILE_BYTES:
         raise ValueError("file is too large to preview")
     return {
         "path": str(safe_relative_path(relative_path)),

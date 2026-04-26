@@ -13,7 +13,7 @@ Next.js chat UI with a Django/Python backend for local AI workflows.
 - HuggingFace GGUF model search in the admin registry with one-click install form fill.
 - SQLite for local development, MySQL via environment variables.
 - llama.cpp integration through `llama-server` and GGUF models.
-- Chat queueing, stop generation, context history, input/attachment limits, and a Russian-language guard against random language drift.
+- Chat queueing, stop generation, context history, and a Russian-language guard against random language drift.
 - Per-chat workspace API for generated files: tree, read/write, zip download, diff, and rollback.
 - Admin maintenance endpoints for runtime logs, disk usage, cleanup, SQLite backup, and local GGUF import.
 
@@ -205,9 +205,10 @@ Useful llama.cpp env vars:
 - `LLAMA_CPP_THREADS`: optional thread count.
 - `LLAMA_CPP_GPU_LAYERS`: optional GPU layer count.
 - `TTD_LLAMA_CPP_N_PREDICT`: max generated tokens per request, default `1024`.
-- `TTD_MAX_PROMPT_CHARS`: prompt limit, default `12000`.
-- `TTD_MAX_ATTACHMENTS`: attachment count limit, default `8`.
-- `TTD_MAX_ATTACHMENT_CHARS`: per-attachment text/data limit, default `250000`.
+- `TTD_MAX_PROMPT_CHARS`: optional prompt limit; `0` means unlimited, default `0`.
+- `TTD_MAX_ATTACHMENTS`: optional attachment count limit; `0` means unlimited, default `0`.
+- `TTD_MAX_ATTACHMENT_CHARS`: optional per-attachment text/data limit; `0` means unlimited, default `0`.
+- `TTD_WORKSPACE_MAX_FILE_BYTES`: optional workspace file preview/write limit; `0` means unlimited, default `0`.
 - `TTD_CHAT_CONTEXT_MESSAGES`: previous chat messages sent to llama.cpp, default `12`.
 - `TTD_ADMIN_SESSION_TTL_SECONDS`: admin session TTL, default `86400`.
 - `TTD_LOGIN_RATE_LIMIT_ATTEMPTS`: failed login attempts before cooldown, default `5`.

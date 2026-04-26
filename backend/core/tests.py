@@ -249,15 +249,16 @@ class ApiSmokeTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["health"], "/api/health")
 
-    def test_chat_stream_rejects_oversized_prompt(self) -> None:
-        with override_settings(TTD_MAX_PROMPT_CHARS=5):
+    def test_chat_stream_has_no_default_prompt_limit(self) -> None:
+        with override_settings(TTD_MAX_PROMPT_CHARS=0):
             response = self.client.post(
                 "/api/chat/stream",
-                data=json.dumps({"message": "too long"}),
+                data=json.dumps({"message": "x" * 20000, "model": "deepseek-r1:14b"}),
                 content_type="application/json",
             )
-        self.assertEqual(response.status_code, 413)
-        self.assertFalse(response.json()["ok"])
+        self.assertEqual(response.status_code, 200)
+        body = b"".join(response.streaming_content).decode("utf-8")
+        self.assertIn("event: done", body)
 
     def test_workspace_file_diff_rollback_and_zip(self) -> None:
         generated_dir = tempfile.TemporaryDirectory()
