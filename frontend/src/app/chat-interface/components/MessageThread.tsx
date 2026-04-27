@@ -174,12 +174,71 @@ function splitAssistantContent(content: string): AssistantPart[] {
   return parts.filter(part => part.type === 'code' || part.content.length > 0);
 }
 
-function renderInlineBold(text: string): React.ReactNode[] {
-  return text.split(/(\*\*[^*]+?\*\*)/g).map((part, index) => {
+const LATEX_SYMBOLS: Record<string, string> = {
+  '\\rightarrow': '→',
+  '\\to': '→',
+  '\\leftarrow': '←',
+  '\\leftrightarrow': '↔',
+  '\\Rightarrow': '⇒',
+  '\\Leftarrow': '⇐',
+  '\\Leftrightarrow': '⇔',
+  '\\uparrow': '↑',
+  '\\downarrow': '↓',
+  '\\mapsto': '↦',
+  '\\times': '×',
+  '\\cdot': '·',
+  '\\pm': '±',
+  '\\approx': '≈',
+  '\\neq': '≠',
+  '\\leq': '≤',
+  '\\geq': '≥',
+  '\\lt': '<',
+  '\\gt': '>',
+  '\\infty': '∞',
+  '\\alpha': 'α',
+  '\\beta': 'β',
+  '\\gamma': 'γ',
+  '\\delta': 'δ',
+  '\\lambda': 'λ',
+  '\\mu': 'μ',
+  '\\pi': 'π',
+  '\\sigma': 'σ',
+  '\\omega': 'ω',
+};
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function latexInlineToText(value: string): string {
+  let result = value.trim();
+  result = result.replace(/\\text\{([^}]*)\}/g, '$1');
+  Object.entries(LATEX_SYMBOLS)
+    .sort(([a], [b]) => b.length - a.length)
+    .forEach(([command, symbol]) => {
+      result = result.replace(new RegExp(escapeRegExp(command), 'g'), symbol);
+    });
+  return result
+    .replace(/\\quad/g, '  ')
+    .replace(/\\[,;:!]/g, ' ')
+    .replace(/\\([A-Za-z]+)/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function renderInlineMarkdown(text: string, keyPrefix = 'inline'): React.ReactNode[] {
+  return text.split(/(\*\*[^*]+?\*\*|\$[^$]+?\$)/g).map((part, index) => {
     if (part.startsWith('**') && part.endsWith('**')) {
-      return <strong key={index}>{part.slice(2, -2)}</strong>;
+      return <strong key={`${keyPrefix}-bold-${index}`}>{renderInlineMarkdown(part.slice(2, -2), `${keyPrefix}-bold-${index}`)}</strong>;
     }
-    return <React.Fragment key={index}>{part}</React.Fragment>;
+    if (part.startsWith('$') && part.endsWith('$')) {
+      return (
+        <span key={`${keyPrefix}-math-${index}`} className="inline-math">
+          {latexInlineToText(part.slice(1, -1))}
+        </span>
+      );
+    }
+    return <React.Fragment key={`${keyPrefix}-text-${index}`}>{part}</React.Fragment>;
   });
 }
 
@@ -193,7 +252,7 @@ function RichText({ text, streaming }: { text: string; streaming?: boolean }) {
         <p key={index}>
           {paragraph.split('\n').map((line, lineIndex, lines) => (
             <React.Fragment key={`${index}-${lineIndex}`}>
-              {renderInlineBold(line)}
+              {renderInlineMarkdown(line, `${index}-${lineIndex}`)}
               {lineIndex < lines.length - 1 && <br />}
             </React.Fragment>
           ))}

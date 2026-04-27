@@ -404,6 +404,15 @@
     font-weight: 800;
   }
 
+  .inline-math {
+    display: inline-block;
+    min-width: 0.65em;
+    color: #f4fff9;
+    font-weight: 700;
+    padding: 0 0.08em;
+    transform: translateY(-0.02em);
+  }
+
   .markdown-code-canvas {
     margin-top: 12px;
     overflow: hidden;
