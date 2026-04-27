@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { ChevronDown, ChevronRight, Copy, Download, CheckCircle, XCircle, Terminal, FileCode, Image } from 'lucide-react';
+import { ChevronDown, ChevronRight, Copy, Download, CheckCircle, XCircle, Terminal, FileCode, Image, Activity } from 'lucide-react';
 import { toast } from 'sonner';
 import type { Message, GeneratedFile } from './ChatInterfaceClient';
 
@@ -101,6 +101,37 @@ function CodeBlock({ file }: { file: GeneratedFile }) {
   );
 }
 
+function visibleAssistantContent(content: string): string {
+  return content
+    .replace(/```(?:ttd-file|file)\s+(?:path=)?["']?[^"'\n`]+["']?\s*\n[\s\S]*?```/gi, '')
+    .replace(/```(?:ttd-file|file)\s+(?:path=)?["']?[^"'\n`]+["']?\s*\n[\s\S]*$/gi, '')
+    .trim();
+}
+
+function GenerationActivity({ message }: { message: Message }) {
+  const generation = message.generation;
+  if (!generation || generation.status !== 'streaming') return null;
+
+  const progress = Math.max(1, Math.min(99, Number(generation.progress || 1)));
+  return (
+    <div className="generation-activity mb-3">
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-2 min-w-0">
+          <Activity size={13} className="text-ttd-green generation-activity-icon" />
+          <div className="min-w-0">
+            <div className="generation-activity-title">Модель работает над вашим запросом</div>
+            <div className="generation-activity-text truncate">{generation.activity || 'Пишу в чат...'}</div>
+          </div>
+        </div>
+        <div className="text-[10px] text-ttd-green font-mono">{progress}%</div>
+      </div>
+      <div className="generation-progress mt-3">
+        <div className="generation-progress-fill" style={{ width: `${progress}%` }} />
+      </div>
+    </div>
+  );
+}
+
 function MessageBubble({ message }: { message: Message }) {
   const [thinkingOpen, setThinkingOpen] = useState(false);
 
@@ -142,6 +173,10 @@ function MessageBubble({ message }: { message: Message }) {
   }
 
   // Assistant message
+  const content = visibleAssistantContent(message.content);
+  const hasGeneratedFiles = Boolean(message.generatedFiles && message.generatedFiles.length > 0);
+  const hasBody = Boolean(content || hasGeneratedFiles || message.testResult);
+
   return (
     <div className="px-4 py-3 animate-fade-in">
       <div className="max-w-4xl w-full">
@@ -155,7 +190,7 @@ function MessageBubble({ message }: { message: Message }) {
           )}
           {message.streaming && (
             <div className="flex items-center gap-1 ml-1">
-              <span className="text-[10px] text-ttd-green animate-pulse">streaming</span>
+              <span className="text-[10px] text-ttd-green animate-pulse">{message.generation?.phase || 'streaming'}</span>
             </div>
           )}
         </div>
@@ -198,40 +233,45 @@ function MessageBubble({ message }: { message: Message }) {
           </div>
         )}
 
+        <GenerationActivity message={message} />
+
         {/* Message content */}
-        <div className="message-assistant px-4 py-3">
-          <p className={`text-sm text-ttd-text leading-relaxed whitespace-pre-wrap ${message.streaming ? 'streaming-cursor' : ''}`}>
-            {message.content}
-            {message.streaming && !message.content && <span className="text-ttd-green animate-blink">█</span>}
-          </p>
+        {hasBody && (
+          <div className="message-assistant px-4 py-3">
+            {content && (
+              <p className={`text-sm text-ttd-text leading-relaxed whitespace-pre-wrap ${message.streaming ? 'streaming-cursor' : ''}`}>
+                {content}
+              </p>
+            )}
 
-          {/* Generated files */}
-          {message.generatedFiles && message.generatedFiles.map((file) => (
-            <CodeBlock key={file.id} file={file} />
-          ))}
+            {/* Generated files */}
+            {message.generatedFiles && message.generatedFiles.map((file) => (
+              <CodeBlock key={file.id} file={file} />
+            ))}
 
-          {/* Test result */}
-          {message.testResult && (
-            <div className={`mt-3 flex items-start gap-2 px-3 py-2 rounded-sm border text-xs ${
-              message.testResult.passed
-                ? 'border-ttd-green/30 bg-[rgba(0,255,136,0.04)] text-ttd-green'
-                : 'border-ttd-red/30 bg-[rgba(255,68,68,0.04)] text-ttd-red'
-            }`}>
-              {message.testResult.passed ? (
-                <CheckCircle size={13} className="mt-0.5 flex-shrink-0" />
-              ) : (
-                <XCircle size={13} className="mt-0.5 flex-shrink-0" />
-              )}
-              <div>
-                <div className="font-semibold mb-0.5 flex items-center gap-1.5">
-                  <Terminal size={10} />
-                  {message.testResult.passed ? 'TESTS PASSED' : 'TESTS FAILED'}
+            {/* Test result */}
+            {message.testResult && (
+              <div className={`mt-3 flex items-start gap-2 px-3 py-2 rounded-sm border text-xs ${
+                message.testResult.passed
+                  ? 'border-ttd-green/30 bg-[rgba(0,255,136,0.04)] text-ttd-green'
+                  : 'border-ttd-red/30 bg-[rgba(255,68,68,0.04)] text-ttd-red'
+              }`}>
+                {message.testResult.passed ? (
+                  <CheckCircle size={13} className="mt-0.5 flex-shrink-0" />
+                ) : (
+                  <XCircle size={13} className="mt-0.5 flex-shrink-0" />
+                )}
+                <div>
+                  <div className="font-semibold mb-0.5 flex items-center gap-1.5">
+                    <Terminal size={10} />
+                    {message.testResult.passed ? 'TESTS PASSED' : 'TESTS FAILED'}
+                  </div>
+                  <div className="text-[11px] opacity-80 font-mono">{message.testResult.output}</div>
                 </div>
-                <div className="text-[11px] opacity-80 font-mono">{message.testResult.output}</div>
               </div>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -15,6 +15,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
+from django.db import close_old_connections, connection
 from django.db.models import Count
 from django.http import FileResponse, HttpRequest, HttpResponse, StreamingHttpResponse
 from django.utils import timezone
@@ -38,11 +39,9 @@ from .services import (
     build_local_draft,
     chunk_text,
     create_model_file_artifacts,
-    file_generation_prompt,
     search_huggingface_models,
     stream_llamacpp,
     system_snapshot,
-    wants_file,
     wants_image,
 )
 from .utils import client_ip, json_response, log_admin_action, make_token, parse_json, require_admin, sse, user_agent
@@ -412,6 +411,267 @@ def chat_context(chat: Chat, current_message_id: UUID) -> list[dict[str, str]]:
     return [{"role": msg.role, "content": msg.content} for msg in reversed(list(messages))]
 
 
+def generation_metadata(status: str, phase: str, activity: str, progress: int) -> dict:
+    return {
+        "status": status,
+        "phase": phase,
+        "activity": activity,
+        "progress": max(0, min(100, int(progress))),
+    }
+
+
+def set_generation_state(message: Message, status: str, phase: str, activity: str, progress: int) -> None:
+    metadata = message.metadata if isinstance(message.metadata, dict) else {}
+    metadata["generation"] = generation_metadata(status, phase, activity, progress)
+    message.metadata = metadata
+    message.save(update_fields=["metadata", "updated_at"])
+
+
+def save_generation_progress(
+    message: Message,
+    content: str,
+    token_count: int,
+    status: str,
+    phase: str,
+    activity: str,
+    progress: int,
+) -> None:
+    metadata = message.metadata if isinstance(message.metadata, dict) else {}
+    metadata["generation"] = generation_metadata(status, phase, activity, progress)
+    message.content = content
+    message.total_tokens = token_count
+    message.metadata = metadata
+    message.save(update_fields=["content", "total_tokens", "metadata", "updated_at"])
+
+
+def activity_for_stream(content: str, token_count: int, mode: str) -> tuple[str, str, int]:
+    lowered = content.lower()
+    if "```ttd-file" in lowered:
+        progress = min(88, 35 + max(1, token_count // 8))
+        return "files", "Заполняю кодом файл(-ы)...", progress
+    if mode == "expert" and token_count > 40:
+        progress = min(90, 30 + max(1, token_count // 10))
+        return "polish", "Окончательно довожу до идеала...", progress
+    progress = min(88, 18 + max(1, token_count // 8))
+    return "chat", "Пишу в чат...", progress
+
+
+def status_event_payload(message: Message) -> dict:
+    generation = message.metadata.get("generation", {}) if isinstance(message.metadata, dict) else {}
+    return {
+        "messageId": str(message.id),
+        "status": generation.get("status") or "streaming",
+        "phase": generation.get("phase") or "working",
+        "activity": generation.get("activity") or "Модель работает над вашим запросом...",
+        "progress": int(generation.get("progress") or 0),
+    }
+
+
+def run_chat_generation_job(
+    *,
+    chat_id: UUID,
+    assistant_id: UUID,
+    log_id: UUID,
+    prompt: str,
+    mode: str,
+    model_name: str,
+    selected_model_id: UUID | None,
+    system_prompt: str,
+    history: list[dict[str, str]],
+    public_image_base: str,
+    attachment_count: int,
+    started: float,
+) -> None:
+    close_old_connections()
+    content = ""
+    token_count = 0
+    last_save = 0.0
+
+    try:
+        chat = Chat.objects.get(id=chat_id)
+        assistant = Message.objects.get(id=assistant_id)
+        log = RequestLog.objects.get(id=log_id)
+        selected = ModelRegistry.objects.filter(id=selected_model_id).first() if selected_model_id else None
+
+        queued = queue_status()["busy"]
+        if queued:
+            set_generation_state(assistant, "streaming", "queued", "Модель работает над вашим запросом: ждет свободный слот...", 3)
+
+        use_llamacpp = settings.TTD_MODEL_BACKEND in {"llamacpp", "llama.cpp"} and not wants_image(prompt)
+        with generation_slot(str(chat.id)) as slot:
+            if slot["waitSeconds"] > 0.05:
+                set_generation_state(assistant, "streaming", "starting", "Очередь прошла. Запускаю генерацию...", 8)
+
+            if use_llamacpp:
+                set_generation_state(assistant, "streaming", "loading", "Поднимаю llama.cpp и выбранную модель...", 10)
+                ensure_llama_server(selected)
+                set_generation_state(assistant, "streaming", "chat", "Пишу в чат...", 15)
+                for token in stream_llamacpp(
+                    prompt,
+                    mode,
+                    model_name,
+                    system_prompt,
+                    history=history,
+                    stop_checker=raise_if_generation_stopped,
+                ):
+                    content += token
+                    token_count += max(1, len(token.split()))
+                    phase, activity, progress = activity_for_stream(content, token_count, mode)
+                    now = time.monotonic()
+                    if now - last_save >= 0.25 or phase == "files":
+                        save_generation_progress(assistant, content, token_count, "streaming", phase, activity, progress)
+                        last_save = now
+
+                set_generation_state(assistant, "streaming", "files", "Проверяю, создала ли модель файл(-ы)...", 90)
+                artifacts, passed, output, cleaned = create_model_file_artifacts(prompt, content, str(chat.id), allow_fallback=False)
+                if artifacts:
+                    set_generation_state(assistant, "streaming", "files", "Сохраняю файл(-ы) в workspace...", 94)
+                    assistant.test_passed = passed
+                    assistant.test_output = output
+                    for file in artifacts:
+                        GeneratedFile.objects.create(
+                            message=assistant,
+                            name=file.name,
+                            language=file.language,
+                            content=file.content,
+                            file_type=file.file_type,
+                            disk_path=file.disk_path,
+                        )
+                    content = cleaned
+            else:
+                set_generation_state(assistant, "streaming", "draft", "Готовлю локальный ответ...", 15)
+                draft = build_local_draft(
+                    prompt,
+                    mode,
+                    model_name,
+                    public_image_base,
+                    attachment_count,
+                    chat_id=str(chat.id),
+                )
+                if draft.thinking:
+                    assistant.thinking = draft.thinking
+                    assistant.save(update_fields=["thinking", "updated_at"])
+                    set_generation_state(assistant, "streaming", "thinking", "Думаю над задачей...", 25)
+                for token in chunk_text(draft.content):
+                    raise_if_generation_stopped()
+                    content += token
+                    token_count += max(1, len(token.split()))
+                    phase, activity, progress = activity_for_stream(content, token_count, mode)
+                    save_generation_progress(assistant, content, token_count, "streaming", phase, activity, progress)
+                    time.sleep(0.015)
+                token_count = draft.tokens
+                assistant.test_passed = draft.test_passed
+                assistant.test_output = draft.test_output
+                for file in draft.files:
+                    GeneratedFile.objects.create(
+                        message=assistant,
+                        name=file.name,
+                        language=file.language,
+                        content=file.content,
+                        file_type=file.file_type,
+                        disk_path=file.disk_path,
+                    )
+
+        elapsed = max(0.001, time.monotonic() - started)
+        assistant.content = content
+        assistant.total_tokens = token_count
+        assistant.tokens_per_sec = token_count / elapsed
+        metadata = assistant.metadata if isinstance(assistant.metadata, dict) else {}
+        metadata["generation"] = generation_metadata("success", "done", "Все готово.", 100)
+        assistant.metadata = metadata
+        assistant.save()
+
+        log.status = "success"
+        log.response = content
+        log.tokens = token_count
+        log.latency_ms = int(elapsed * 1000)
+        log.save()
+        chat.save(update_fields=["updated_at"])
+    except GenerationStopped as exc:
+        elapsed = max(0.001, time.monotonic() - started)
+        try:
+            assistant = Message.objects.get(id=assistant_id)
+            assistant.content = content or "Generation stopped."
+            assistant.total_tokens = token_count
+            assistant.test_passed = False
+            assistant.test_output = str(exc)
+            metadata = assistant.metadata if isinstance(assistant.metadata, dict) else {}
+            metadata["generation"] = generation_metadata("error", "stopped", "Генерация остановлена.", 100)
+            assistant.metadata = metadata
+            assistant.save()
+            log = RequestLog.objects.get(id=log_id)
+            log.status = "error"
+            log.error_details = str(exc)
+            log.latency_ms = int(elapsed * 1000)
+            log.response = content
+            log.tokens = token_count
+            log.save()
+        except Message.DoesNotExist:
+            pass
+    except Exception as exc:
+        elapsed = max(0.001, time.monotonic() - started)
+        try:
+            assistant = Message.objects.get(id=assistant_id)
+            assistant.content = content or "Generation failed."
+            assistant.test_passed = False
+            assistant.test_output = str(exc)
+            metadata = assistant.metadata if isinstance(assistant.metadata, dict) else {}
+            metadata["generation"] = generation_metadata("error", "error", "Генерация упала.", 100)
+            assistant.metadata = metadata
+            assistant.save()
+            log = RequestLog.objects.get(id=log_id)
+            log.status = "error"
+            log.error_details = str(exc)
+            log.latency_ms = int(elapsed * 1000)
+            log.save()
+        except Message.DoesNotExist:
+            pass
+    finally:
+        close_old_connections()
+
+
+def stream_generation_updates(chat: Chat, assistant: Message, log: RequestLog, *, run_inline=None):
+    last_content = ""
+    last_status = ""
+    last_progress = -1
+    inline_ran = False
+    while True:
+        if run_inline and not inline_ran:
+            inline_ran = True
+            run_inline()
+
+        current = Message.objects.prefetch_related("attachments", "generated_files").filter(id=assistant.id).first()
+        if not current:
+            yield sse("error", {"error": "Chat was deleted while generation was running"})
+            return
+
+        status_payload = status_event_payload(current)
+        status_key = f"{status_payload['status']}:{status_payload['phase']}:{status_payload['activity']}"
+        if status_key != last_status or status_payload["progress"] != last_progress:
+            last_status = status_key
+            last_progress = status_payload["progress"]
+            yield sse("status", status_payload)
+
+        if current.content.startswith(last_content):
+            delta = current.content[len(last_content) :]
+        else:
+            delta = current.content
+        if delta:
+            last_content = current.content
+            yield sse("token", {"text": delta})
+
+        generation = current.metadata.get("generation", {}) if isinstance(current.metadata, dict) else {}
+        if generation.get("status") == "success":
+            saved_chat = Chat.objects.filter(id=chat.id).first()
+            yield sse("done", {"message": message_to_dict(current), "chat": chat_to_summary(saved_chat or chat)})
+            return
+        if generation.get("status") == "error":
+            yield sse("error", {"error": current.test_output or "Generation failed", "message": message_to_dict(current)})
+            return
+
+        time.sleep(0.2)
+
+
 @csrf_exempt
 def chat_stream(request: HttpRequest):
     ensure_defaults()
@@ -465,131 +725,51 @@ def chat_stream(request: HttpRequest):
     selected = selected_model or ModelRegistry.objects.filter(name=model_name).first()
     system_prompt = selected.system_prompt if selected else ""
     history = chat_context(chat, user_msg.id)
+    assistant.metadata = {
+        "generation": generation_metadata(
+            "streaming",
+            "queued" if queue_status()["busy"] else "starting",
+            "Модель работает над вашим запросом...",
+            1,
+        )
+    }
+    assistant.save(update_fields=["metadata", "updated_at"])
+    public_image_base = request.build_absolute_uri(f"{settings.MEDIA_URL}generated/images/")
+
+    job_kwargs = {
+        "chat_id": chat.id,
+        "assistant_id": assistant.id,
+        "log_id": log.id,
+        "prompt": prompt,
+        "mode": mode,
+        "model_name": model_name,
+        "selected_model_id": selected.id if selected else None,
+        "system_prompt": system_prompt,
+        "history": history,
+        "public_image_base": public_image_base,
+        "attachment_count": len(attachments),
+        "started": started,
+    }
 
     def generate():
-        content = ""
-        token_count = 0
-        try:
-            queued = queue_status()["busy"]
-            yield sse(
-                "meta",
-                {
-                    "chatId": str(chat.id),
-                    "userMessageId": str(user_msg.id),
-                    "assistantMessageId": str(assistant.id),
-                    "ts": timezone.localtime(assistant.created_at).strftime("%H:%M:%S"),
-                    "queued": queued,
-                },
-            )
-            if queued:
-                yield sse("thinking", {"text": "Запрос поставлен в очередь локальной модели. Ждем, пока текущая генерация освободит llama.cpp."})
+        queued = queue_status()["busy"]
+        yield sse(
+            "meta",
+            {
+                "chatId": str(chat.id),
+                "userMessageId": str(user_msg.id),
+                "assistantMessageId": str(assistant.id),
+                "ts": timezone.localtime(assistant.created_at).strftime("%H:%M:%S"),
+                "queued": queued,
+            },
+        )
+        if connection.in_atomic_block:
+            yield from stream_generation_updates(chat, assistant, log, run_inline=lambda: run_chat_generation_job(**job_kwargs))
+            return
 
-            use_llamacpp = settings.TTD_MODEL_BACKEND in {"llamacpp", "llama.cpp"} and not wants_image(prompt)
-            generate_files_with_llama = use_llamacpp and wants_file(prompt)
-            with generation_slot(str(chat.id)) as slot:
-                if slot["waitSeconds"] > 0.05:
-                    yield sse("thinking", {"text": f"Очередь прошла за {slot['waitSeconds']:.1f}s. Генерация началась."})
-
-                if use_llamacpp:
-                    ensure_llama_server(selected)
-                    model_prompt = file_generation_prompt(prompt) if generate_files_with_llama else prompt
-                    for token in stream_llamacpp(
-                        model_prompt,
-                        mode,
-                        model_name,
-                        system_prompt,
-                        history=history,
-                        stop_checker=raise_if_generation_stopped,
-                    ):
-                        content += token
-                        token_count += max(1, len(token.split()))
-                        yield sse("token", {"text": token})
-                    if generate_files_with_llama:
-                        artifacts, passed, output, cleaned = create_model_file_artifacts(prompt, content, str(chat.id))
-                        if artifacts:
-                            assistant.test_passed = passed
-                            assistant.test_output = output
-                            for file in artifacts:
-                                GeneratedFile.objects.create(
-                                    message=assistant,
-                                    name=file.name,
-                                    language=file.language,
-                                    content=file.content,
-                                    file_type=file.file_type,
-                                    disk_path=file.disk_path,
-                                )
-                            content = cleaned
-                else:
-                    public_image_base = request.build_absolute_uri(f"{settings.MEDIA_URL}generated/images/")
-                    draft = build_local_draft(
-                        prompt,
-                        mode,
-                        model_name,
-                        public_image_base,
-                        len(attachments),
-                        chat_id=str(chat.id),
-                    )
-                    if draft.thinking:
-                        assistant.thinking = draft.thinking
-                        yield sse("thinking", {"text": draft.thinking})
-                    for token in chunk_text(draft.content):
-                        raise_if_generation_stopped()
-                        content += token
-                        yield sse("token", {"text": token})
-                        time.sleep(0.015)
-                    token_count = draft.tokens
-                    assistant.test_passed = draft.test_passed
-                    assistant.test_output = draft.test_output
-                    for file in draft.files:
-                        GeneratedFile.objects.create(
-                            message=assistant,
-                            name=file.name,
-                            language=file.language,
-                            content=file.content,
-                            file_type=file.file_type,
-                            disk_path=file.disk_path,
-                        )
-
-            elapsed = max(0.001, time.monotonic() - started)
-            assistant.content = content
-            assistant.total_tokens = token_count
-            assistant.tokens_per_sec = token_count / elapsed
-            assistant.save()
-
-            log.status = "success"
-            log.response = content
-            log.tokens = token_count
-            log.latency_ms = int(elapsed * 1000)
-            log.save()
-
-            chat.save(update_fields=["updated_at"])
-            saved = Message.objects.prefetch_related("attachments", "generated_files").get(id=assistant.id)
-            yield sse("done", {"message": message_to_dict(saved), "chat": chat_to_summary(chat)})
-        except GenerationStopped as exc:
-            elapsed = max(0.001, time.monotonic() - started)
-            log.status = "error"
-            log.error_details = str(exc)
-            log.latency_ms = int(elapsed * 1000)
-            log.response = content
-            log.tokens = token_count
-            log.save()
-            assistant.content = content or "Generation stopped."
-            assistant.total_tokens = token_count
-            assistant.test_passed = False
-            assistant.test_output = str(exc)
-            assistant.save()
-            yield sse("error", {"error": str(exc)})
-        except Exception as exc:
-            elapsed = max(0.001, time.monotonic() - started)
-            log.status = "error"
-            log.error_details = str(exc)
-            log.latency_ms = int(elapsed * 1000)
-            log.save()
-            assistant.content = content or "Generation failed."
-            assistant.test_passed = False
-            assistant.test_output = str(exc)
-            assistant.save()
-            yield sse("error", {"error": str(exc)})
+        thread = threading.Thread(target=run_chat_generation_job, kwargs=job_kwargs, daemon=True)
+        thread.start()
+        yield from stream_generation_updates(chat, assistant, log)
 
     response = StreamingHttpResponse(generate(), content_type="text/event-stream")
     response["Cache-Control"] = "no-cache"

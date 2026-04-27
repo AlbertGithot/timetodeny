@@ -89,6 +89,7 @@ export async function deleteJson<T>(path: string, admin = false): Promise<T> {
 interface StreamHandlers {
   onMeta?: (data: Record<string, unknown>) => void;
   onThinking?: (text: string) => void;
+  onStatus?: (data: Record<string, unknown>) => void;
   onToken?: (text: string) => void;
   onDone?: (data: Record<string, unknown>) => void;
   onError?: (error: string) => void;
@@ -135,6 +136,7 @@ export async function streamChat(payload: unknown, handlers: StreamHandlers, sig
       if (parsed) {
         if (parsed.event === 'meta') handlers.onMeta?.(parsed.data);
         if (parsed.event === 'thinking') handlers.onThinking?.(String(parsed.data.text || ''));
+        if (parsed.event === 'status') handlers.onStatus?.(parsed.data);
         if (parsed.event === 'token') handlers.onToken?.(String(parsed.data.text || ''));
         if (parsed.event === 'done') handlers.onDone?.(parsed.data);
         if (parsed.event === 'error') handlers.onError?.(String(parsed.data.error || 'Unknown stream error'));

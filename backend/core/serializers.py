@@ -23,6 +23,16 @@ def message_to_dict(message: Message) -> dict:
         "content": message.content,
         "ts": time_label(message.created_at),
     }
+    generation = message.metadata.get("generation") if isinstance(message.metadata, dict) else None
+    if isinstance(generation, dict):
+        payload["generation"] = {
+            "status": generation.get("status") or "streaming",
+            "phase": generation.get("phase") or "working",
+            "activity": generation.get("activity") or "Модель работает над вашим запросом...",
+            "progress": int(generation.get("progress") or 0),
+        }
+        if generation.get("status") == "streaming":
+            payload["streaming"] = True
     if message.thinking:
         payload["thinking"] = message.thinking
         payload["thinkingVisible"] = False

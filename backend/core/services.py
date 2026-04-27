@@ -120,11 +120,10 @@ def language_from_filename(filename: str, fallback: str = "text") -> str:
     }.get(ext, fallback)
 
 
-def file_generation_prompt(prompt: str) -> str:
-    return f"""{prompt.strip()}
-
-You must create real file content for the user's request.
-Return a short note, then one or more file blocks in this exact format:
+def artifact_protocol_prompt() -> str:
+    return """You can create real workspace files when that is the right way to satisfy the user.
+Decide yourself whether the user needs normal chat text or one or more files.
+When the user asks for code, a project, files, "send it as files", or an implementation that is better delivered as files, output file blocks in this exact format:
 
 ```ttd-file path="relative/path.ext"
 full file content here
@@ -135,7 +134,8 @@ Rules:
 - Do not use absolute paths.
 - Do not omit file content.
 - If multiple files are needed, output multiple ttd-file blocks.
-- Keep any explanation outside the file blocks short.
+- Keep explanation outside file blocks short.
+- For normal chat answers, do not output ttd-file blocks.
 """
 
 
@@ -283,7 +283,13 @@ def create_code_artifact(prompt: str, chat_id: str | None = None) -> tuple[Artif
     return ArtifactDraft(name=name, language=language, content=content, file_type="code", disk_path=str(disk_path)), passed, output
 
 
-def create_model_file_artifacts(prompt: str, response: str, chat_id: str) -> tuple[list[ArtifactDraft], bool | None, str, str]:
+def create_model_file_artifacts(
+    prompt: str,
+    response: str,
+    chat_id: str,
+    *,
+    allow_fallback: bool = False,
+) -> tuple[list[ArtifactDraft], bool | None, str, str]:
     from .workspaces import write_workspace_file
 
     artifacts: list[ArtifactDraft] = []
@@ -309,7 +315,7 @@ def create_model_file_artifacts(prompt: str, response: str, chat_id: str) -> tup
         test_outputs.append(f"{relative_path}: {output}")
         consumed_ranges.append(match.span())
 
-    if not artifacts:
+    if allow_fallback and not artifacts:
         code_pattern = re.compile(r"```(?P<language>[A-Za-z0-9_+.-]*)\s*\n(?P<content>.*?)```", re.DOTALL)
         match = code_pattern.search(response)
         if match:
@@ -323,7 +329,7 @@ def create_model_file_artifacts(prompt: str, response: str, chat_id: str) -> tup
             test_outputs.append(f"{fallback_name}: {output}")
             consumed_ranges.append(match.span())
 
-    if not artifacts and response.strip():
+    if allow_fallback and not artifacts and response.strip():
         fallback_name, fallback_language = infer_file(prompt)
         content = response.strip()
         disk_path = write_workspace_file(chat_id, fallback_name, content)
@@ -474,6 +480,7 @@ def llama_cpp_system_prompt(mode: str, system_prompt: str = "", latest_prompt: s
         system += "\nAnswer directly and keep latency low."
     if latest_prompt:
         system += f"\n{language_guard(latest_prompt)}"
+    system += f"\n{artifact_protocol_prompt()}"
     return system
 
 

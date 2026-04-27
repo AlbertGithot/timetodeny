@@ -371,6 +371,25 @@ print('hi')
         self.assertIn("Создал файл", cleaned)
         self.assertNotIn("ttd-file", cleaned)
 
+    def test_model_file_artifact_parser_does_not_guess_without_protocol(self) -> None:
+        generated_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(generated_dir.cleanup)
+        chat = Chat.objects.create(title="plain code")
+        response = """Вот код:
+
+```python
+print('hi')
+```
+"""
+
+        with override_settings(TTD_GENERATED_DIR=Path(generated_dir.name)):
+            artifacts, passed, output, cleaned = create_model_file_artifacts("напиши код", response, str(chat.id))
+
+        self.assertEqual(artifacts, [])
+        self.assertIsNone(passed)
+        self.assertEqual(output, "")
+        self.assertEqual(cleaned, response.strip())
+
     def test_llamacpp_file_request_creates_generated_file(self) -> None:
         model_dir = tempfile.TemporaryDirectory()
         generated_dir = tempfile.TemporaryDirectory()
@@ -401,7 +420,7 @@ print('hi')
             with patch("core.views.ensure_llama_server"), patch("core.views.stream_llamacpp", return_value=llama_tokens) as stream:
                 response = self.client.post(
                     "/api/chat/stream",
-                    data=json.dumps({"message": "создай файл hello.py", "model": "coder"}),
+                    data=json.dumps({"message": "напиши небольшой скрипт и лучше файлами мне все скинь", "model": "coder"}),
                     content_type="application/json",
                 )
                 body = b"".join(response.streaming_content).decode("utf-8")
@@ -411,8 +430,8 @@ print('hi')
         self.assertTrue(GeneratedFile.objects.filter(name="hello.py", content__contains="print('hello')").exists())
         self.assertTrue(list((Path(generated_dir.name) / "workspaces").glob("*/hello.py")))
         sent_prompt = stream.call_args.args[0]
-        self.assertIn("ttd-file", sent_prompt)
-        self.assertIn("создай файл hello.py", sent_prompt)
+        self.assertNotIn("ttd-file", sent_prompt)
+        self.assertIn("лучше файлами", sent_prompt)
 
     def test_admin_import_local_models_and_runtime_maintenance(self) -> None:
         model_dir = tempfile.TemporaryDirectory()
@@ -461,6 +480,7 @@ print('hi')
         self.assertEqual(payload["messages"][2]["role"], "user")
         self.assertEqual(payload["messages"][2]["content"], "Say hello")
         self.assertIn("same language", payload["messages"][0]["content"])
+        self.assertIn("ttd-file", payload["messages"][0]["content"])
         self.assertNotIn("max_tokens", payload)
 
     @patch("urllib.request.urlopen", return_value=FakeLlamaResponse())
