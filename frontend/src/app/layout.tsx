@@ -2,6 +2,7 @@ import React from 'react';
 import type { Metadata, Viewport } from 'next';
 import '../styles/tailwind.css';
 import { Toaster } from 'sonner';
+import GlobalGenerationOverlay from './components/GlobalGenerationOverlay';
 
 export const viewport: Viewport = {
   width: 'device-width',
@@ -23,6 +24,7 @@ export default function RootLayout({
     <html lang="en">
       <body className="bg-ttd-bg text-ttd-text font-mono scanline-overlay min-h-screen">
         {children}
+        <GlobalGenerationOverlay />
         <Toaster
           position="bottom-right"
           toastOptions={{

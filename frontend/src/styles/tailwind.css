@@ -443,6 +443,39 @@
     transition: width 0.35s ease;
   }
 
+  .global-generation-overlay {
+    position: fixed;
+    z-index: 70;
+    top: 14px;
+    left: 50%;
+    width: min(680px, calc(100vw - 28px));
+    transform: translateX(-50%);
+    pointer-events: none;
+  }
+
+  .global-generation-card {
+    position: relative;
+    display: block;
+    width: 100%;
+    overflow: hidden;
+    border: 1px solid rgba(0, 255, 136, 0.28);
+    border-radius: 4px;
+    padding: 12px 14px;
+    background: linear-gradient(135deg, rgba(12, 18, 14, 0.94), rgba(8, 10, 9, 0.9));
+    box-shadow: 0 14px 42px rgba(0, 0, 0, 0.48), 0 0 26px rgba(0, 255, 136, 0.11);
+    pointer-events: auto;
+    animation: neon-breathe 2.4s ease-in-out infinite, fadeIn 0.18s ease forwards;
+  }
+
+  .global-generation-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), rgba(0, 255, 136, 0.14), transparent);
+    animation: neon-sweep 2.1s linear infinite;
+    pointer-events: none;
+  }
+
   .sidebar-overlay {
     background: rgba(0, 0, 0, 0.7);
     backdrop-filter: blur(2px);

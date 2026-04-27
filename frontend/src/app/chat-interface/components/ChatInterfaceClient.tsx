@@ -9,6 +9,7 @@ import ChatInputBar from './ChatInputBar';
 import ChatHeader from './ChatHeader';
 import WorkspacePanel from './WorkspacePanel';
 import { getJson, postJson, streamChat } from '@/lib/api';
+import { clearTrackedGeneration, setTrackedGeneration } from '@/lib/generation-watch';
 
 export type Mode = 'instant' | 'expert';
 
@@ -85,6 +86,25 @@ function isNetworkStreamError(message: string): boolean {
     || text.includes('connection closed');
 }
 
+function latestStreamingAssistant(messages: Message[]): Message | null {
+  return [...messages].reverse().find(message =>
+    message.role === 'assistant'
+    && (message.streaming || message.generation?.status === 'streaming')
+  ) || null;
+}
+
+function publishTrackedMessage(chatId: string | null, message: Message | null): void {
+  if (!chatId || !message) return;
+  setTrackedGeneration({
+    chatId,
+    messageId: message.id,
+    status: message.generation?.status || 'streaming',
+    phase: message.generation?.phase || 'working',
+    activity: message.generation?.activity || 'Модель работает над вашим запросом...',
+    progress: message.generation?.progress || 1,
+  });
+}
+
 export default function ChatInterfaceClient() {
   const searchParams = useSearchParams();
   const initialMode = (searchParams.get('mode') as Mode) || 'instant';
@@ -117,11 +137,15 @@ export default function ChatInterfaceClient() {
     getJson<ChatDetailResponse>(`/chats/${id}`)
       .then((payload) => {
         if (cancelled) return;
+        const nextMessages = payload.chat.messages || [];
         setChatId(payload.chat.id);
-        setMessages(payload.chat.messages || []);
-        setIsStreaming((payload.chat.messages || []).some(m => m.streaming));
+        setMessages(nextMessages);
+        setIsStreaming(nextMessages.some(m => m.streaming));
         setMode(payload.chat.mode || initialMode);
         setActiveModel(payload.chat.model || 'local-assistant');
+        const streaming = latestStreamingAssistant(nextMessages);
+        if (streaming) publishTrackedMessage(payload.chat.id, streaming);
+        else clearTrackedGeneration(payload.chat.id);
       })
       .catch((error: Error) => toast.error(error.message));
 
@@ -139,6 +163,9 @@ export default function ChatInterfaceClient() {
           const nextMessages = payload.chat.messages || [];
           setMessages(nextMessages);
           setIsStreaming(nextMessages.some(m => m.streaming));
+          const streaming = latestStreamingAssistant(nextMessages);
+          if (streaming) publishTrackedMessage(payload.chat.id, streaming);
+          else clearTrackedGeneration(payload.chat.id);
         })
         .catch(() => undefined);
     }, 1200);
@@ -192,6 +219,19 @@ export default function ChatInterfaceClient() {
     let knownChatId = chatId;
     let keepWatchingSavedGeneration = false;
     const controller = new AbortController();
+    const publishGeneration = (generation: Message['generation'] = assistantMsg.generation) => {
+      if (!knownChatId) return;
+      setTrackedGeneration({
+        chatId: knownChatId,
+        messageId: assistantMessageId,
+        status: generation?.status || 'streaming',
+        phase: generation?.phase || 'starting',
+        activity: generation?.activity || 'Модель работает над вашим запросом...',
+        progress: generation?.progress || 1,
+      });
+    };
+
+    publishGeneration();
     abortRef.current = controller;
     try {
       await streamChat(
@@ -214,6 +254,7 @@ export default function ChatInterfaceClient() {
                 m.id === streamingId ? { ...m, id: assistantMessageId } : m
               ));
             }
+            publishGeneration();
           },
           onThinking: (thinking) => {
             setMessages(prev => prev.map(m =>
@@ -221,16 +262,18 @@ export default function ChatInterfaceClient() {
             ));
           },
           onStatus: (status) => {
+            const generation = {
+              status: String(status.status || 'streaming'),
+              phase: String(status.phase || 'working'),
+              activity: String(status.activity || 'Модель работает над вашим запросом...'),
+              progress: Number(status.progress || 0),
+            };
+            publishGeneration(generation);
             setMessages(prev => prev.map(m =>
               m.id === assistantMessageId
                 ? {
                     ...m,
-                    generation: {
-                      status: String(status.status || 'streaming'),
-                      phase: String(status.phase || 'working'),
-                      activity: String(status.activity || 'Модель работает над вашим запросом...'),
-                      progress: Number(status.progress || 0),
-                    },
+                    generation,
                   }
                 : m
             ));
@@ -246,6 +289,7 @@ export default function ChatInterfaceClient() {
           onDone: (data) => {
             const done = data as StreamDonePayload;
             if (done.chat?.id) setChatId(done.chat.id);
+            clearTrackedGeneration(done.chat?.id || knownChatId || chatId || undefined);
             if (done.message) {
               setMessages(prev => prev.map(m =>
                 m.id === assistantMessageId ? { ...done.message!, streaming: false } : m
@@ -263,6 +307,7 @@ export default function ChatInterfaceClient() {
       );
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
+        clearTrackedGeneration(knownChatId || chatId || undefined);
         setMessages(prev => prev.map(m =>
           m.id === assistantMessageId
             ? { ...m, content: accumulated || 'Generation stopped.', streaming: false }
@@ -281,7 +326,16 @@ export default function ChatInterfaceClient() {
           const nextMessages = payload.chat.messages || [];
           setMessages(nextMessages);
           setIsStreaming(nextMessages.some(m => m.streaming));
+          const streaming = latestStreamingAssistant(nextMessages);
+          if (streaming) publishTrackedMessage(payload.chat.id, streaming);
+          else clearTrackedGeneration(payload.chat.id);
         } catch {
+          publishGeneration({
+            status: 'streaming',
+            phase: 'reconnect',
+            activity: 'Соединение со стримом оборвалось. Подхватываю сохраненную генерацию...',
+            progress: 5,
+          });
           setMessages(prev => prev.map(m =>
             m.id === assistantMessageId
               ? {
@@ -300,6 +354,7 @@ export default function ChatInterfaceClient() {
         toast('Соединение со стримом оборвалось. Подхватываю сохраненную генерацию.');
         return;
       }
+      clearTrackedGeneration(knownChatId || chatId || undefined);
       setMessages(prev => prev.map(m =>
         m.id === assistantMessageId
           ? {
@@ -319,19 +374,23 @@ export default function ChatInterfaceClient() {
       }
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
-      if (!keepWatchingSavedGeneration) setIsStreaming(false);
+      if (!keepWatchingSavedGeneration) {
+        clearTrackedGeneration(knownChatId || chatId || undefined);
+        setIsStreaming(false);
+      }
     }
   }, [activeModel, chatId, mode]);
 
   const handleStop = useCallback(() => {
     abortRef.current?.abort();
     void postJson('/chat/stop', {}).catch(() => undefined);
+    clearTrackedGeneration(chatId || undefined);
     setIsStreaming(false);
     setMessages(prev => prev.map(m =>
       m.streaming ? { ...m, streaming: false, content: m.content || 'Generation stopped.' } : m
     ));
     toast('Generation stopped');
-  }, []);
+  }, [chatId]);
 
   const handleModeChange = (newMode: Mode) => {
     setMode(newMode);
@@ -348,6 +407,7 @@ export default function ChatInterfaceClient() {
         isStreaming={isStreaming}
         onSidebarToggle={() => setSidebarOpen(true)}
         onNewChat={() => {
+          clearTrackedGeneration(chatId || undefined);
           setChatId(null);
           setMessages([]);
           toast('New conversation started');
@@ -363,6 +423,7 @@ export default function ChatInterfaceClient() {
               onClose={() => setSidebarOpen(false)}
               onChatDeleted={(deletedId) => {
                 if (deletedId === chatId) {
+                  clearTrackedGeneration(deletedId);
                   setChatId(null);
                   setMessages([]);
                   setIsStreaming(false);
