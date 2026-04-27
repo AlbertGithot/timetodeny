@@ -228,22 +228,6 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
         )}
       </div>
 
-      {/* Streaming indicator */}
-      {isStreaming && (
-        <div className="flex items-center gap-1.5 animate-fade-in">
-          <div className="flex gap-0.5">
-            {[0, 1, 2].map((i) => (
-              <span
-                key={`dot-${i}`}
-                className="w-1 h-1 bg-ttd-green rounded-full animate-bounce"
-                style={{ animationDelay: `${i * 0.15}s` }}
-              />
-            ))}
-          </div>
-          <span className="text-[10px] text-ttd-green">generating</span>
-        </div>
-      )}
-
       <div className="ml-auto flex items-center gap-2">
         <button
           onClick={onNewChat}
