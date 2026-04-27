@@ -39,9 +39,11 @@ from .services import (
     build_local_draft,
     chunk_text,
     create_model_file_artifacts,
+    language_from_filename,
     search_huggingface_models,
     stream_llamacpp,
     system_snapshot,
+    test_generated_file,
     wants_image,
 )
 from .utils import client_ip, json_response, log_admin_action, make_token, parse_json, require_admin, sse, user_agent
@@ -53,6 +55,7 @@ from .workspaces import (
     list_workspace_tree,
     read_workspace_file,
     rollback_workspace_file,
+    safe_workspace_path,
     write_workspace_file,
 )
 
@@ -447,11 +450,17 @@ def save_generation_progress(
 def activity_for_stream(content: str, token_count: int, mode: str) -> tuple[str, str, int]:
     lowered = content.lower()
     if "```ttd-file" in lowered:
-        progress = min(88, 35 + max(1, token_count // 8))
+        progress = min(88, 36 + max(1, token_count // 8))
+        after_marker = lowered.rsplit("```ttd-file", 1)[-1]
+        if "\n" not in after_marker or len(after_marker.strip()) < 80:
+            return "files", "Создаю файл(-ы)...", progress
         return "files", "Заполняю кодом файл(-ы)...", progress
     if mode == "expert" and token_count > 40:
         progress = min(90, 30 + max(1, token_count // 10))
         return "polish", "Окончательно довожу до идеала...", progress
+    if token_count < 32:
+        progress = min(45, 16 + max(1, token_count // 4))
+        return "plan", "Планирую структуру ответа...", progress
     progress = min(88, 18 + max(1, token_count // 8))
     return "chat", "Пишу в чат...", progress
 
@@ -505,7 +514,7 @@ def run_chat_generation_job(
             if use_llamacpp:
                 set_generation_state(assistant, "streaming", "loading", "Поднимаю llama.cpp и выбранную модель...", 10)
                 ensure_llama_server(selected)
-                set_generation_state(assistant, "streaming", "chat", "Пишу в чат...", 15)
+                set_generation_state(assistant, "streaming", "plan", "Планирую структуру ответа...", 15)
                 for token in stream_llamacpp(
                     prompt,
                     mode,
@@ -525,7 +534,7 @@ def run_chat_generation_job(
                 set_generation_state(assistant, "streaming", "files", "Проверяю, создала ли модель файл(-ы)...", 90)
                 artifacts, passed, output, cleaned = create_model_file_artifacts(prompt, content, str(chat.id), allow_fallback=False)
                 if artifacts:
-                    set_generation_state(assistant, "streaming", "files", "Сохраняю файл(-ы) в workspace...", 94)
+                    set_generation_state(assistant, "streaming", "tests", "Сохраняю и проверяю файл(-ы)...", 94)
                     assistant.test_passed = passed
                     assistant.test_output = output
                     for file in artifacts:
@@ -1396,6 +1405,25 @@ def workspace_diff(request: HttpRequest, chat_id: UUID):
         return json_response({"ok": True, "diff": diff_workspace_file(chat_id, request.GET.get("path") or "")})
     except FileNotFoundError:
         return json_response({"ok": False, "error": "File/version not found"}, status=404)
+    except ValueError as exc:
+        return json_response({"ok": False, "error": str(exc)}, status=400)
+
+
+@csrf_exempt
+def workspace_test(request: HttpRequest, chat_id: UUID):
+    if request.method != "POST":
+        return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+    if not Chat.objects.filter(id=chat_id).exists():
+        return json_response({"ok": False, "error": "Chat not found"}, status=404)
+    data = parse_json(request)
+    relative_path = data.get("path") or ""
+    try:
+        file = read_workspace_file(chat_id, relative_path)
+        disk_path = safe_workspace_path(chat_id, relative_path)
+        passed, output = test_generated_file(disk_path, language_from_filename(relative_path))
+        return json_response({"ok": True, "result": {"path": file["path"], "passed": passed, "output": output}})
+    except FileNotFoundError:
+        return json_response({"ok": False, "error": "File not found"}, status=404)
     except ValueError as exc:
         return json_response({"ok": False, "error": str(exc)}, status=400)
 

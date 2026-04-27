@@ -331,6 +331,11 @@ class ApiSmokeTests(TestCase):
             )
             tree = self.client.get(f"/api/workspaces/{chat.id}")
             diff = self.client.get(f"/api/workspaces/{chat.id}/diff?path=app.py")
+            test_run = self.client.post(
+                f"/api/workspaces/{chat.id}/test",
+                data=json.dumps({"path": "app.py"}),
+                content_type="application/json",
+            )
             rollback = self.client.post(
                 f"/api/workspaces/{chat.id}/rollback",
                 data=json.dumps({"path": "app.py"}),
@@ -345,6 +350,8 @@ class ApiSmokeTests(TestCase):
         self.assertEqual(diff.status_code, 200)
         self.assertIn("-print('one')", diff.json()["diff"]["diff"])
         self.assertIn("+print('two')", diff.json()["diff"]["diff"])
+        self.assertEqual(test_run.status_code, 200)
+        self.assertTrue(test_run.json()["result"]["passed"])
         self.assertEqual(rollback.status_code, 200)
         self.assertEqual(rollback.json()["file"]["content"], "print('one')\n")
         self.assertEqual(archive.status_code, 200)

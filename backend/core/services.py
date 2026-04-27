@@ -124,7 +124,13 @@ def language_from_filename(filename: str, fallback: str = "text") -> str:
 def artifact_protocol_prompt() -> str:
     return """You can create real workspace files when that is the right way to satisfy the user.
 Decide yourself whether the user needs normal chat text or one or more files.
-When the user asks for code, a project, files, "send it as files", or an implementation that is better delivered as files, output file blocks in this exact format:
+When the user asks for code, a project, files, "send it as files", or an implementation that is better delivered as files, use this workflow:
+
+1. Write a very short implementation plan in normal chat text.
+2. Output every needed file as a complete file block.
+3. Finish with a short summary of what was created and what should be tested.
+
+File blocks must use this exact format:
 
 ```ttd-file path="relative/path.ext"
 full file content here
@@ -134,9 +140,11 @@ Rules:
 - Use safe relative paths only.
 - Do not use absolute paths.
 - Do not omit file content.
+- Do not put commentary inside file blocks.
 - If multiple files are needed, output multiple ttd-file blocks.
 - Keep explanation outside file blocks short.
 - For normal chat answers, do not output ttd-file blocks.
+- Do not mention the ttd-file protocol to the user.
 """
 
 

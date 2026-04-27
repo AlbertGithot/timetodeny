@@ -16,6 +16,7 @@ urlpatterns = [
     path("api/workspaces/<uuid:chat_id>/file", views.workspace_file),
     path("api/workspaces/<uuid:chat_id>/zip", views.workspace_zip),
     path("api/workspaces/<uuid:chat_id>/diff", views.workspace_diff),
+    path("api/workspaces/<uuid:chat_id>/test", views.workspace_test),
     path("api/workspaces/<uuid:chat_id>/rollback", views.workspace_rollback),
     path("api/models", views.models_collection),
     path("api/models/search", views.models_search),
