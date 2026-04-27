@@ -22,7 +22,7 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body className="bg-ttd-bg text-ttd-text font-mono scanline-overlay min-h-screen">
+      <body className="bg-ttd-bg text-ttd-text scanline-overlay min-h-screen">
         {children}
         <GlobalGenerationOverlay />
         <Toaster
@@ -32,7 +32,7 @@ export default function RootLayout({
               background: '#141414',
               border: '1px solid #2a2a2a',
               color: '#e8e8e8',
-              fontFamily: 'JetBrains Mono, monospace',
+              fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif',
               fontSize: '12px',
               borderRadius: '3px',
             },

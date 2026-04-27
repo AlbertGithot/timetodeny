@@ -11,6 +11,10 @@ interface Props {
   messagesEndRef: React.RefObject<HTMLDivElement | null>;
 }
 
+type AssistantPart =
+  | { type: 'text'; content: string }
+  | { type: 'code'; language: string; content: string };
+
 function CodeBlock({ file }: { file: GeneratedFile }) {
   const [copied, setCopied] = useState(false);
 
@@ -101,11 +105,102 @@ function CodeBlock({ file }: { file: GeneratedFile }) {
   );
 }
 
+function MarkdownCodeCanvas({ language, code }: { language: string; code: string }) {
+  const [copied, setCopied] = useState(false);
+  const label = (language || 'code').trim().slice(0, 18).toUpperCase();
+
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1800);
+    toast.success('Copied code block');
+  };
+
+  return (
+    <div className="markdown-code-canvas">
+      <div className="markdown-code-header">
+        <div className="flex items-center gap-2 min-w-0">
+          <FileCode size={12} className="text-ttd-cyan flex-shrink-0" />
+          <span className="text-[10px] text-ttd-cyan font-semibold tracking-wider">CODE CANVAS</span>
+          <span className="text-[10px] text-ttd-muted border border-ttd-border px-1.5 py-0.5 rounded-sm uppercase">
+            {label}
+          </span>
+        </div>
+        <button
+          onClick={handleCopy}
+          className="ttd-btn ttd-btn-ghost px-2 py-0.5 text-[10px] flex items-center gap-1"
+        >
+          <Copy size={10} />
+          {copied ? 'COPIED' : 'COPY'}
+        </button>
+      </div>
+      <pre className="markdown-code-body">
+        <code>{code || ' '}</code>
+      </pre>
+    </div>
+  );
+}
+
 function visibleAssistantContent(content: string): string {
   return content
     .replace(/```(?:ttd-file|file)\s+(?:path=)?["']?[^"'\n`]+["']?\s*\n[\s\S]*?```/gi, '')
     .replace(/```(?:ttd-file|file)\s+(?:path=)?["']?[^"'\n`]+["']?\s*\n[\s\S]*$/gi, '')
     .trim();
+}
+
+function splitAssistantContent(content: string): AssistantPart[] {
+  const parts: AssistantPart[] = [];
+  const pattern = /```([A-Za-z0-9_+.-]*)[^\n`]*\n?([\s\S]*?)(?:```|$)/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(content)) !== null) {
+    if (match.index > cursor) {
+      parts.push({ type: 'text', content: content.slice(cursor, match.index) });
+    }
+    parts.push({
+      type: 'code',
+      language: match[1] || 'code',
+      content: match[2].replace(/\n$/, ''),
+    });
+    cursor = pattern.lastIndex;
+    if (match[0].endsWith(content.slice(match.index)) && !match[0].endsWith('```')) break;
+  }
+
+  if (cursor < content.length) {
+    parts.push({ type: 'text', content: content.slice(cursor) });
+  }
+
+  return parts.filter(part => part.type === 'code' || part.content.length > 0);
+}
+
+function renderInlineBold(text: string): React.ReactNode[] {
+  return text.split(/(\*\*[^*]+?\*\*)/g).map((part, index) => {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      return <strong key={index}>{part.slice(2, -2)}</strong>;
+    }
+    return <React.Fragment key={index}>{part}</React.Fragment>;
+  });
+}
+
+function RichText({ text, streaming }: { text: string; streaming?: boolean }) {
+  const paragraphs = text.split(/\n{2,}/).filter(Boolean);
+  if (paragraphs.length === 0) return null;
+
+  return (
+    <div className={`assistant-rich-text ${streaming ? 'streaming-cursor' : ''}`}>
+      {paragraphs.map((paragraph, index) => (
+        <p key={index}>
+          {paragraph.split('\n').map((line, lineIndex, lines) => (
+            <React.Fragment key={`${index}-${lineIndex}`}>
+              {renderInlineBold(line)}
+              {lineIndex < lines.length - 1 && <br />}
+            </React.Fragment>
+          ))}
+        </p>
+      ))}
+    </div>
+  );
 }
 
 function GenerationActivity({ message }: { message: Message }) {
@@ -174,8 +269,9 @@ function MessageBubble({ message }: { message: Message }) {
 
   // Assistant message
   const content = visibleAssistantContent(message.content);
+  const contentParts = splitAssistantContent(content);
   const hasGeneratedFiles = Boolean(message.generatedFiles && message.generatedFiles.length > 0);
-  const hasBody = Boolean(content || hasGeneratedFiles || message.testResult);
+  const hasBody = Boolean(contentParts.length > 0 || hasGeneratedFiles || message.testResult);
 
   return (
     <div className="px-4 py-3 animate-fade-in">
@@ -238,11 +334,11 @@ function MessageBubble({ message }: { message: Message }) {
         {/* Message content */}
         {hasBody && (
           <div className="message-assistant px-4 py-3">
-            {content && (
-              <p className={`text-sm text-ttd-text leading-relaxed whitespace-pre-wrap ${message.streaming ? 'streaming-cursor' : ''}`}>
-                {content}
-              </p>
-            )}
+            {contentParts.map((part, index) => (
+              part.type === 'code'
+                ? <MarkdownCodeCanvas key={`code-${index}`} language={part.language} code={part.content} />
+                : <RichText key={`text-${index}`} text={part.content} streaming={message.streaming && index === contentParts.length - 1} />
+            ))}
 
             {/* Generated files */}
             {message.generatedFiles && message.generatedFiles.map((file) => (
