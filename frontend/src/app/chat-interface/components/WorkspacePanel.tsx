@@ -61,6 +61,7 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
   const [diff, setDiff] = useState('');
   const [showDiff, setShowDiff] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadedChatId, setLoadedChatId] = useState<string | null>(null);
 
   const selectedFile = useMemo(
     () => files.find(file => file.path === selectedPath) || null,
@@ -73,14 +74,22 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
       setSelectedPath('');
       setContent('');
       setDiff('');
+      setLoadedChatId(null);
       return;
     }
     setLoading(true);
     getJson<WorkspaceResponse>(`/workspaces/${chatId}`)
       .then((payload) => {
+        setLoadedChatId(chatId);
         setFiles(payload.workspace.files);
-        if (!selectedPath && payload.workspace.files.length > 0) {
+        const selectedStillExists = payload.workspace.files.some(file => file.path === selectedPath);
+        if (!selectedStillExists && payload.workspace.files.length > 0) {
           setSelectedPath(payload.workspace.files[0].path);
+        }
+        if (payload.workspace.files.length === 0) {
+          setSelectedPath('');
+          setContent('');
+          setDiff('');
         }
       })
       .catch(() => undefined)
@@ -139,6 +148,10 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
       toast.error(error instanceof Error ? error.message : 'Rollback failed');
     }
   };
+
+  if (!chatId || loadedChatId !== chatId || files.length === 0) {
+    return null;
+  }
 
   return (
     <aside className="hidden xl:flex w-[360px] 2xl:w-[420px] flex-shrink-0 border-l border-ttd-border bg-ttd-surface/60 flex-col overflow-hidden">

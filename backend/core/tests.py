@@ -10,7 +10,7 @@ from django.test import Client, TestCase, override_settings
 
 from .models import Chat, GeneratedFile, ModelRegistry, RequestLog
 from .seed import ensure_defaults
-from .services import stream_llamacpp
+from .services import create_model_file_artifacts, stream_llamacpp
 
 
 class FakeLlamaResponse:
@@ -314,6 +314,72 @@ class ApiSmokeTests(TestCase):
         self.assertEqual(rollback.status_code, 200)
         self.assertEqual(rollback.json()["file"]["content"], "print('one')\n")
         self.assertEqual(archive.status_code, 200)
+
+    def test_model_file_artifact_parser_writes_workspace_file(self) -> None:
+        generated_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(generated_dir.cleanup)
+        chat = Chat.objects.create(title="model file")
+        response = """Готово.
+
+```ttd-file path="src/app.py"
+print('hi')
+```
+"""
+
+        with override_settings(TTD_GENERATED_DIR=Path(generated_dir.name)):
+            artifacts, passed, output, cleaned = create_model_file_artifacts("создай файл app.py", response, str(chat.id))
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0].name, "src/app.py")
+        self.assertEqual(artifacts[0].content, "print('hi')")
+        self.assertTrue(Path(artifacts[0].disk_path).is_file())
+        self.assertTrue(passed)
+        self.assertIn("py_compile", output)
+        self.assertIn("Создал файл", cleaned)
+        self.assertNotIn("ttd-file", cleaned)
+
+    def test_llamacpp_file_request_creates_generated_file(self) -> None:
+        model_dir = tempfile.TemporaryDirectory()
+        generated_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(model_dir.cleanup)
+        self.addCleanup(generated_dir.cleanup)
+        model_path = Path(model_dir.name) / "coder.gguf"
+        model_path.write_bytes(b"gguf")
+        ModelRegistry.objects.create(
+            name="coder",
+            repo_id="local",
+            filename="coder.gguf",
+            status="ready",
+            selected=True,
+            local_path=str(model_path),
+        )
+
+        llama_tokens = iter([
+            "Готово.\n\n",
+            "```ttd-file path=\"hello.py\"\n",
+            "print('hello')\n",
+            "```",
+        ])
+        with override_settings(
+            TTD_MODEL_BACKEND="llamacpp",
+            TTD_MODEL_DIR=Path(model_dir.name),
+            TTD_GENERATED_DIR=Path(generated_dir.name),
+        ):
+            with patch("core.views.ensure_llama_server"), patch("core.views.stream_llamacpp", return_value=llama_tokens) as stream:
+                response = self.client.post(
+                    "/api/chat/stream",
+                    data=json.dumps({"message": "создай файл hello.py", "model": "coder"}),
+                    content_type="application/json",
+                )
+                body = b"".join(response.streaming_content).decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event: done", body)
+        self.assertTrue(GeneratedFile.objects.filter(name="hello.py", content__contains="print('hello')").exists())
+        self.assertTrue(list((Path(generated_dir.name) / "workspaces").glob("*/hello.py")))
+        sent_prompt = stream.call_args.args[0]
+        self.assertIn("ttd-file", sent_prompt)
+        self.assertIn("создай файл hello.py", sent_prompt)
 
     def test_admin_import_local_models_and_runtime_maintenance(self) -> None:
         model_dir = tempfile.TemporaryDirectory()

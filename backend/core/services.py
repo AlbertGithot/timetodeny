@@ -102,6 +102,51 @@ def infer_file(prompt: str) -> tuple[str, str]:
     return name, language
 
 
+def language_from_filename(filename: str, fallback: str = "text") -> str:
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return {
+        "py": "python",
+        "tsx": "tsx",
+        "ts": "typescript",
+        "js": "javascript",
+        "html": "html",
+        "css": "css",
+        "json": "json",
+        "md": "markdown",
+        "txt": "text",
+        "yml": "yaml",
+        "yaml": "yaml",
+        "sh": "bash",
+    }.get(ext, fallback)
+
+
+def file_generation_prompt(prompt: str) -> str:
+    return f"""{prompt.strip()}
+
+You must create real file content for the user's request.
+Return a short note, then one or more file blocks in this exact format:
+
+```ttd-file path="relative/path.ext"
+full file content here
+```
+
+Rules:
+- Use safe relative paths only.
+- Do not use absolute paths.
+- Do not omit file content.
+- If multiple files are needed, output multiple ttd-file blocks.
+- Keep any explanation outside the file blocks short.
+"""
+
+
+def _safe_generated_relative_path(value: str, fallback: str) -> str:
+    cleaned = value.strip().strip("\"'` ")
+    cleaned = cleaned.replace("\\", "/").lstrip("/")
+    parts = [safe_filename(part, "") for part in cleaned.split("/") if part and part not in {".", ".."}]
+    result = "/".join(part for part in parts if part)
+    return result or fallback
+
+
 def generated_dir(kind: str) -> Path:
     path = Path(settings.TTD_GENERATED_DIR) / kind
     path.mkdir(parents=True, exist_ok=True)
@@ -236,6 +281,67 @@ def create_code_artifact(prompt: str, chat_id: str | None = None) -> tuple[Artif
     disk_path.write_text(content, encoding="utf-8")
     passed, output = test_generated_file(disk_path, language)
     return ArtifactDraft(name=name, language=language, content=content, file_type="code", disk_path=str(disk_path)), passed, output
+
+
+def create_model_file_artifacts(prompt: str, response: str, chat_id: str) -> tuple[list[ArtifactDraft], bool | None, str, str]:
+    from .workspaces import write_workspace_file
+
+    artifacts: list[ArtifactDraft] = []
+    test_outputs: list[str] = []
+    passed_values: list[bool] = []
+    consumed_ranges: list[tuple[int, int]] = []
+
+    explicit_pattern = re.compile(
+        r"```(?:ttd-file|file)\s+(?:path=)?[\"']?(?P<path>[^\"'\n`]+)[\"']?\s*\n(?P<content>.*?)```",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for match in explicit_pattern.finditer(response):
+        raw_path = match.group("path")
+        content = match.group("content").strip("\n")
+        if not content.strip():
+            continue
+        relative_path = _safe_generated_relative_path(raw_path, infer_file(prompt)[0])
+        language = language_from_filename(relative_path)
+        disk_path = write_workspace_file(chat_id, relative_path, content)
+        passed, output = test_generated_file(disk_path, language)
+        artifacts.append(ArtifactDraft(name=relative_path, language=language, content=content, file_type="code", disk_path=str(disk_path)))
+        passed_values.append(passed)
+        test_outputs.append(f"{relative_path}: {output}")
+        consumed_ranges.append(match.span())
+
+    if not artifacts:
+        code_pattern = re.compile(r"```(?P<language>[A-Za-z0-9_+.-]*)\s*\n(?P<content>.*?)```", re.DOTALL)
+        match = code_pattern.search(response)
+        if match:
+            fallback_name, fallback_language = infer_file(prompt)
+            content = match.group("content").strip("\n")
+            language = language_from_filename(fallback_name, match.group("language") or fallback_language)
+            disk_path = write_workspace_file(chat_id, fallback_name, content)
+            passed, output = test_generated_file(disk_path, language)
+            artifacts.append(ArtifactDraft(name=fallback_name, language=language, content=content, file_type="code", disk_path=str(disk_path)))
+            passed_values.append(passed)
+            test_outputs.append(f"{fallback_name}: {output}")
+            consumed_ranges.append(match.span())
+
+    if not artifacts and response.strip():
+        fallback_name, fallback_language = infer_file(prompt)
+        content = response.strip()
+        disk_path = write_workspace_file(chat_id, fallback_name, content)
+        passed, output = test_generated_file(disk_path, fallback_language)
+        artifacts.append(ArtifactDraft(name=fallback_name, language=fallback_language, content=content, file_type="code", disk_path=str(disk_path)))
+        passed_values.append(passed)
+        test_outputs.append(f"{fallback_name}: {output}")
+
+    cleaned_response = response
+    for start, end in reversed(consumed_ranges):
+        cleaned_response = f"{cleaned_response[:start]}{cleaned_response[end:]}"
+    cleaned_response = cleaned_response.strip()
+    if artifacts:
+        file_list = ", ".join(f"`{artifact.name}`" for artifact in artifacts)
+        cleaned_response = f"Создал файл(ы): {file_list}." + (f"\n\n{cleaned_response}" if cleaned_response else "")
+
+    aggregate_passed = all(passed_values) if passed_values else None
+    return artifacts, aggregate_passed, "\n".join(test_outputs), cleaned_response
 
 
 def create_image_artifact(prompt: str, public_url: str) -> ArtifactDraft:

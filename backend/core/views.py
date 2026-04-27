@@ -32,6 +32,8 @@ from .serializers import (
 from .services import (
     build_local_draft,
     chunk_text,
+    create_model_file_artifacts,
+    file_generation_prompt,
     search_huggingface_models,
     stream_llamacpp,
     system_snapshot,
@@ -398,15 +400,17 @@ def chat_stream(request: HttpRequest):
             if queued:
                 yield sse("thinking", {"text": "Запрос поставлен в очередь локальной модели. Ждем, пока текущая генерация освободит llama.cpp."})
 
-            use_llamacpp = settings.TTD_MODEL_BACKEND in {"llamacpp", "llama.cpp"} and not wants_file(prompt) and not wants_image(prompt)
+            use_llamacpp = settings.TTD_MODEL_BACKEND in {"llamacpp", "llama.cpp"} and not wants_image(prompt)
+            generate_files_with_llama = use_llamacpp and wants_file(prompt)
             with generation_slot(str(chat.id)) as slot:
                 if slot["waitSeconds"] > 0.05:
                     yield sse("thinking", {"text": f"Очередь прошла за {slot['waitSeconds']:.1f}s. Генерация началась."})
 
                 if use_llamacpp:
                     ensure_llama_server(selected)
+                    model_prompt = file_generation_prompt(prompt) if generate_files_with_llama else prompt
                     for token in stream_llamacpp(
-                        prompt,
+                        model_prompt,
                         mode,
                         model_name,
                         system_prompt,
@@ -416,6 +420,21 @@ def chat_stream(request: HttpRequest):
                         content += token
                         token_count += max(1, len(token.split()))
                         yield sse("token", {"text": token})
+                    if generate_files_with_llama:
+                        artifacts, passed, output, cleaned = create_model_file_artifacts(prompt, content, str(chat.id))
+                        if artifacts:
+                            assistant.test_passed = passed
+                            assistant.test_output = output
+                            for file in artifacts:
+                                GeneratedFile.objects.create(
+                                    message=assistant,
+                                    name=file.name,
+                                    language=file.language,
+                                    content=file.content,
+                                    file_type=file.file_type,
+                                    disk_path=file.disk_path,
+                                )
+                            content = cleaned
                 else:
                     public_image_base = request.build_absolute_uri(f"{settings.MEDIA_URL}generated/images/")
                     draft = build_local_draft(
