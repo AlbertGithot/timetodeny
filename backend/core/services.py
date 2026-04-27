@@ -4,6 +4,7 @@ import html
 import json
 import os
 import re
+import socket
 import subprocess
 import time
 import urllib.error
@@ -587,7 +588,10 @@ def _iter_llamacpp_tokens(payload: dict, stop_checker: Callable[[], None] | None
             if stop_checker:
                 stop_checker()
             time.sleep(2)
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        except (TimeoutError, socket.timeout) as exc:
+            last_error = exc
+            break
+        except (urllib.error.URLError, json.JSONDecodeError) as exc:
             last_error = exc
             break
 
@@ -595,6 +599,12 @@ def _iter_llamacpp_tokens(payload: dict, stop_checker: Callable[[], None] | None
         raise RuntimeError(
             "llama.cpp model is still not ready after waiting. It is usually still loading, out of RAM/VRAM, "
             "or crashed during model load. Check Admin -> Server Load -> runtime logs or run ./linux.sh logs."
+        ) from last_error
+    if isinstance(last_error, (TimeoutError, socket.timeout)):
+        raise RuntimeError(
+            f"llama.cpp did not produce a token within {settings.TTD_REQUEST_TIMEOUT_SECONDS}s. "
+            "The model is too slow for the current server/context, still loading, or stuck. "
+            "Try again, reduce LLAMA_CPP_CTX_SIZE, use a smaller quant/model, or increase TTD_REQUEST_TIMEOUT_SECONDS."
         ) from last_error
 
     raise RuntimeError(

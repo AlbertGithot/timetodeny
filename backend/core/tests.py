@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
 import tempfile
 from pathlib import Path
@@ -469,10 +470,12 @@ print('hi')
 
     @patch("urllib.request.urlopen", return_value=FakeLlamaResponse())
     def test_llamacpp_stream_parser(self, _urlopen) -> None:
-        tokens = list(stream_llamacpp("Say hello", "instant", "test-model", "", history=[{"role": "user", "content": "Earlier"}]))
+        with override_settings(TTD_REQUEST_TIMEOUT_SECONDS=777):
+            tokens = list(stream_llamacpp("Say hello", "instant", "test-model", "", history=[{"role": "user", "content": "Earlier"}]))
         self.assertEqual("".join(tokens), "Hello world")
 
         request = _urlopen.call_args.args[0]
+        self.assertEqual(_urlopen.call_args.kwargs["timeout"], 777)
         self.assertTrue(request.full_url.endswith("/v1/chat/completions"))
         payload = json.loads(request.data.decode("utf-8"))
         self.assertEqual(payload["messages"][1]["role"], "user")
@@ -492,6 +495,12 @@ print('hi')
         request = _urlopen.call_args.args[0]
         payload = json.loads(request.data.decode("utf-8"))
         self.assertEqual(payload["max_tokens"], 4096)
+
+    def test_llamacpp_timeout_reports_slow_model(self) -> None:
+        with patch("urllib.request.urlopen", side_effect=socket.timeout("timed out")):
+            with override_settings(TTD_REQUEST_TIMEOUT_SECONDS=5):
+                with self.assertRaisesRegex(RuntimeError, "did not produce a token within 5s"):
+                    list(stream_llamacpp("Slow please", "instant", "test-model", ""))
 
     @patch("time.sleep", return_value=None)
     def test_llamacpp_stream_retries_503_until_ready(self, _sleep) -> None:
