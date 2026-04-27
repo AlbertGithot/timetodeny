@@ -204,7 +204,7 @@ Useful llama.cpp env vars:
 - `LLAMA_CPP_CTX_SIZE`: context size passed to launcher, default `8192`.
 - `LLAMA_CPP_THREADS`: optional thread count.
 - `LLAMA_CPP_GPU_LAYERS`: optional GPU layer count.
-- `TTD_LLAMA_CPP_N_PREDICT`: max generated tokens per request, default `1024`.
+- `TTD_LLAMA_CPP_N_PREDICT`: optional hard cap for generated tokens per request. Default `0` omits `max_tokens`, so llama.cpp lets the model stop naturally.
 - `TTD_LLAMA_READY_TIMEOUT_SECONDS`: how long Django waits for `llama-server` `/health` and retries temporary `503` responses, default `180`.
 - `TTD_MAX_PROMPT_CHARS`: optional prompt limit; `0` means unlimited, default `0`.
 - `TTD_MAX_ATTACHMENTS`: optional attachment count limit; `0` means unlimited, default `0`.

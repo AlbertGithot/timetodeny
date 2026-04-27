@@ -525,7 +525,7 @@ def _llamacpp_payload(
     system = llama_cpp_system_prompt(mode, system_prompt, prompt)
     if extra_guard:
         system += f"\n{extra_guard}"
-    return {
+    payload = {
         "model": model_name,
         "messages": [
             {"role": "system", "content": system},
@@ -535,8 +535,10 @@ def _llamacpp_payload(
         "stream": True,
         "temperature": 0.12 if mode == "expert" else 0.18,
         "top_p": 0.88,
-        "max_tokens": settings.TTD_LLAMA_CPP_N_PREDICT,
     }
+    if settings.TTD_LLAMA_CPP_N_PREDICT > 0:
+        payload["max_tokens"] = settings.TTD_LLAMA_CPP_N_PREDICT
+    return payload
 
 
 def _iter_llamacpp_tokens(payload: dict, stop_checker: Callable[[], None] | None = None) -> Iterable[str]:

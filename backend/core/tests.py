@@ -461,6 +461,17 @@ print('hi')
         self.assertEqual(payload["messages"][2]["role"], "user")
         self.assertEqual(payload["messages"][2]["content"], "Say hello")
         self.assertIn("same language", payload["messages"][0]["content"])
+        self.assertNotIn("max_tokens", payload)
+
+    @patch("urllib.request.urlopen", return_value=FakeLlamaResponse())
+    def test_llamacpp_stream_can_use_manual_token_cap(self, _urlopen) -> None:
+        with override_settings(TTD_LLAMA_CPP_N_PREDICT=4096):
+            tokens = list(stream_llamacpp("Say hello", "instant", "test-model", ""))
+
+        self.assertEqual("".join(tokens), "Hello world")
+        request = _urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["max_tokens"], 4096)
 
     @patch("time.sleep", return_value=None)
     def test_llamacpp_stream_retries_503_until_ready(self, _sleep) -> None:
