@@ -85,6 +85,8 @@ interface RuntimeInfo {
   backend: string;
   url: string;
   portOpen: boolean;
+  ready?: boolean;
+  health?: string;
   running: boolean;
   managedPid?: number | null;
   managedPidRunning: boolean;
@@ -118,6 +120,7 @@ export default function AdminModelsTab() {
   const [searchingCatalog, setSearchingCatalog] = useState(false);
   const [editingPrompt, setEditingPrompt] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [detailModelId, setDetailModelId] = useState<string | null>(null);
   const [installing, setInstalling] = useState(false);
   const [installProgress, setInstallProgress] = useState(0);
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
@@ -211,6 +214,7 @@ export default function AdminModelsTab() {
     try {
       await postJson(`/models/${id}/delete`, {}, true);
       setModels(prev => prev.filter(m => m.id !== id));
+      if (detailModelId === id) setDetailModelId(null);
       setDeleteConfirm(null);
       loadRuntime();
       toast.success('Model removed from registry');
@@ -316,6 +320,7 @@ export default function AdminModelsTab() {
   // Compatibility check
   const visionModels = models.filter(m => m.type === 'vision');
   const selectedModel = models.find(m => m.selected);
+  const detailModel = visibleModels.find(m => m.id === detailModelId) || selectedModel || visibleModels[0] || null;
   const compatOk = selectedModel?.type !== 'vision';
 
   return (
@@ -644,169 +649,212 @@ export default function AdminModelsTab() {
         </button>
       </div>
 
-      {/* Model cards */}
+      {/* Registry table + detail panel */}
       {hiddenModels.length > 0 && (
         <div className="text-[11px] text-ttd-dim px-1">
-          {hiddenModels.length} hidden model(s) —
+          {hiddenModels.length} hidden model(s) -
           <button onClick={handleShowAll} className="text-ttd-cyan ml-1 hover:underline">show all</button>
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-3 gap-4">
-        {visibleModels.map((model) => (
-          <div
-            key={model.id}
-            className={`model-card p-4 ${model.selected ? 'model-card-active' : ''}`}
-          >
-            {/* Card header */}
-            <div className="flex items-start justify-between mb-3">
-              <div className="flex-1 min-w-0">
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_420px] gap-4">
+        <div className="border border-ttd-border rounded-sm overflow-hidden bg-ttd-surface">
+          <div className="px-4 py-3 border-b border-ttd-border flex items-center gap-2">
+            <Terminal size={13} className="text-ttd-cyan" />
+            <span className="text-xs font-bold tracking-wider text-ttd-text">MODEL REGISTRY</span>
+            <span className="ml-auto text-[10px] text-ttd-muted">{visibleModels.length} visible</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-ttd-border bg-ttd-elevated">
+                  <th className="text-left px-3 py-2.5 text-ttd-muted tracking-wider font-semibold">MODEL</th>
+                  <th className="text-left px-3 py-2.5 text-ttd-muted tracking-wider font-semibold">TYPE</th>
+                  <th className="text-left px-3 py-2.5 text-ttd-muted tracking-wider font-semibold">STATUS</th>
+                  <th className="text-left px-3 py-2.5 text-ttd-muted tracking-wider font-semibold">SIZE</th>
+                  <th className="text-left px-3 py-2.5 text-ttd-muted tracking-wider font-semibold">QUANT</th>
+                  <th className="text-right px-3 py-2.5 text-ttd-muted tracking-wider font-semibold">ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleModels.map((model) => (
+                  <tr
+                    key={model.id}
+                    onClick={() => setDetailModelId(model.id)}
+                    className={`border-b border-ttd-border/50 hover:bg-ttd-elevated/50 cursor-pointer ${
+                      detailModel?.id === model.id ? 'bg-ttd-elevated/60' : ''
+                    } ${model.selected ? 'outline outline-1 outline-ttd-green/20' : ''}`}
+                  >
+                    <td className="px-3 py-2.5 min-w-56">
+                      <div className="flex items-center gap-2">
+                        <span className={`status-dot ${model.selected ? 'status-dot-green' : 'status-dot-dim'}`} />
+                        <span className="text-ttd-text font-semibold truncate max-w-[260px]" title={model.name}>{model.name}</span>
+                        {model.selected && <span className="text-[9px] text-ttd-green border border-ttd-green/40 px-1 py-0.5 rounded-sm">ACTIVE</span>}
+                      </div>
+                      <div className="text-[10px] text-ttd-dim truncate mt-1" title={model.filename}>{model.filename}</div>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className={`text-[10px] border px-1.5 py-0.5 rounded-sm ${TYPE_CONFIG[model.type].cls}`}>
+                        {TYPE_CONFIG[model.type].label}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className={`text-[10px] border px-1.5 py-0.5 rounded-sm ${STATUS_CONFIG[model.status].cls}`}>
+                        {STATUS_CONFIG[model.status].label}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5 text-ttd-muted font-mono whitespace-nowrap">{model.size}</td>
+                    <td className="px-3 py-2.5 text-ttd-cyan font-mono whitespace-nowrap">{model.quantization}</td>
+                    <td className="px-3 py-2.5">
+                      <div className="flex items-center justify-end gap-1.5">
+                        {model.selected ? (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); void handleDeselect(model.id); }}
+                            className="ttd-btn ttd-btn-ghost text-[10px] px-2 py-1"
+                          >
+                            OFF
+                          </button>
+                        ) : (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); void handleSelect(model.id); }}
+                            disabled={model.status !== 'ready'}
+                            className="ttd-btn ttd-btn-green text-[10px] px-2 py-1 disabled:opacity-40"
+                          >
+                            SELECT
+                          </button>
+                        )}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); void handleHide(model.id); }}
+                          className="w-7 h-7 flex items-center justify-center rounded-sm hover:bg-ttd-elevated"
+                          title="Hide model"
+                        >
+                          <EyeOff size={11} className="text-ttd-muted" />
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setDeleteConfirm(model.id); }}
+                          className="w-7 h-7 flex items-center justify-center rounded-sm hover:bg-ttd-red/10"
+                          title="Delete model"
+                        >
+                          <Trash2 size={11} className="text-ttd-red" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {visibleModels.length === 0 && (
+            <div className="flex flex-col items-center justify-center py-16 text-ttd-muted">
+              <EyeOff size={24} className="mb-3 opacity-30" />
+              <div className="text-sm mb-1">No models visible</div>
+              <div className="text-xs text-ttd-dim mb-3">All models are hidden or no models match your search</div>
+              <button onClick={handleShowAll} className="ttd-btn ttd-btn-green text-xs px-4 py-2">SHOW ALL MODELS</button>
+            </div>
+          )}
+        </div>
+
+        <div className="border border-ttd-border rounded-sm bg-ttd-surface overflow-hidden">
+          <div className="px-4 py-3 border-b border-ttd-border flex items-center gap-2">
+            <Activity size={13} className="text-ttd-green" />
+            <span className="text-xs font-bold tracking-wider text-ttd-text">MODEL DETAILS</span>
+          </div>
+          {!detailModel ? (
+            <div className="p-4 text-xs text-ttd-muted">Select a model from the registry.</div>
+          ) : (
+            <div className="p-4 space-y-4">
+              <div>
                 <div className="flex items-center gap-2 mb-1">
-                  <span className="text-sm font-bold text-ttd-text truncate">{model.name}</span>
-                  {model.selected && (
-                    <span className="text-[9px] text-ttd-green border border-ttd-green/40 px-1 py-0.5 rounded-sm flex-shrink-0">ACTIVE</span>
+                  <span className="text-sm font-bold text-ttd-text truncate">{detailModel.name}</span>
+                  {detailModel.selected && <span className="text-[9px] text-ttd-green border border-ttd-green/40 px-1 py-0.5 rounded-sm">ACTIVE</span>}
+                </div>
+                <div className="text-[10px] text-ttd-dim truncate" title={detailModel.repoId}>{detailModel.repoId}</div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 text-[10px]">
+                <div className="bg-ttd-elevated rounded-sm px-2 py-1.5">
+                  <div className="text-ttd-dim mb-0.5">SIZE</div>
+                  <div className="text-ttd-text font-mono">{detailModel.size}</div>
+                </div>
+                <div className="bg-ttd-elevated rounded-sm px-2 py-1.5">
+                  <div className="text-ttd-dim mb-0.5">VRAM</div>
+                  <div className="text-ttd-purple font-mono">{detailModel.vram}</div>
+                </div>
+                <div className="bg-ttd-elevated rounded-sm px-2 py-1.5">
+                  <div className="text-ttd-dim mb-0.5">QUANT</div>
+                  <div className="text-ttd-cyan font-mono">{detailModel.quantization}</div>
+                </div>
+              </div>
+
+              <div className="text-[10px] text-ttd-dim space-y-1">
+                <div className="truncate" title={detailModel.filename}>FILE: {detailModel.filename}</div>
+                {detailModel.localPath && <div className="truncate" title={detailModel.localPath}>LOCAL: {detailModel.localPath}</div>}
+              </div>
+
+              {detailModel.type !== 'vision' && (
+                <div>
+                  {editingPrompt === detailModel.id ? (
+                    <form onSubmit={handlePromptSubmit(handleSavePrompt)} className="space-y-2">
+                      <label className="block text-[10px] text-ttd-muted tracking-wider uppercase">System Prompt</label>
+                      <textarea {...regPrompt('prompt')} rows={6} className="ttd-input text-[11px] resize-none" />
+                      <div className="flex gap-2">
+                        <button type="submit" className="ttd-btn ttd-btn-green text-[10px] px-3 py-1">SAVE</button>
+                        <button type="button" onClick={() => setEditingPrompt(null)} className="ttd-btn ttd-btn-ghost text-[10px] px-3 py-1">CANCEL</button>
+                      </div>
+                    </form>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => handleEditPrompt(detailModel)}
+                      className="w-full text-left bg-ttd-elevated border border-ttd-border rounded-sm px-3 py-2 text-[10px] text-ttd-muted hover:border-ttd-border-bright"
+                    >
+                      {detailModel.systemPrompt || <span className="text-ttd-dim italic">No system prompt - click to set</span>}
+                    </button>
                   )}
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className={`text-[10px] border px-1.5 py-0.5 rounded-sm ${TYPE_CONFIG[model.type].cls}`}>
-                    {TYPE_CONFIG[model.type].label}
-                  </span>
-                  <span className={`text-[10px] border px-1.5 py-0.5 rounded-sm ${STATUS_CONFIG[model.status].cls}`}>
-                    {STATUS_CONFIG[model.status].label}
-                  </span>
-                </div>
-              </div>
-              <button
-                onClick={() => handleHide(model.id)}
-                className="w-6 h-6 flex items-center justify-center rounded hover:bg-ttd-elevated transition-colors flex-shrink-0 ml-2"
-                title="Hide model"
-              >
-                <EyeOff size={11} className="text-ttd-dim hover:text-ttd-muted" />
-              </button>
-            </div>
+              )}
 
-            {/* Stats */}
-            <div className="grid grid-cols-3 gap-2 mb-3 text-[10px]">
-              <div className="bg-ttd-elevated rounded-sm px-2 py-1.5">
-                <div className="text-ttd-dim mb-0.5">SIZE</div>
-                <div className="text-ttd-text font-mono">{model.size}</div>
-              </div>
-              <div className="bg-ttd-elevated rounded-sm px-2 py-1.5">
-                <div className="text-ttd-dim mb-0.5">VRAM</div>
-                <div className="text-ttd-purple font-mono">{model.vram}</div>
-              </div>
-              <div className="bg-ttd-elevated rounded-sm px-2 py-1.5">
-                <div className="text-ttd-dim mb-0.5">QUANT</div>
-                <div className="text-ttd-cyan font-mono">{model.quantization}</div>
-              </div>
-            </div>
-
-            {/* Repo ID */}
-            <div className="text-[10px] text-ttd-dim mb-3 truncate" title={model.repoId}>
-              {model.repoId}
-            </div>
-            {model.localPath && (
-              <div className="text-[10px] text-ttd-dim mb-3 truncate" title={model.localPath}>
-                FILE: {model.localPath}
-              </div>
-            )}
-
-            {/* System prompt preview */}
-            {model.type !== 'vision' && (
-              <div className="mb-3">
-                {editingPrompt === model.id ? (
-                  <form onSubmit={handlePromptSubmit(handleSavePrompt)} className="space-y-2">
-                    <label className="block text-[10px] text-ttd-muted tracking-wider uppercase">System Prompt</label>
-                    <textarea
-                      {...regPrompt('prompt')}
-                      rows={3}
-                      className="ttd-input text-[11px] resize-none"
-                    />
-                    <div className="flex gap-2">
-                      <button type="submit" className="ttd-btn ttd-btn-green text-[10px] px-3 py-1">SAVE</button>
-                      <button type="button" onClick={() => setEditingPrompt(null)} className="ttd-btn ttd-btn-ghost text-[10px] px-3 py-1">CANCEL</button>
-                    </div>
-                  </form>
+              <div className="flex items-center gap-2 flex-wrap">
+                {detailModel.selected ? (
+                  <button onClick={() => void handleDeselect(detailModel.id)} className="ttd-btn ttd-btn-ghost text-[10px] px-3 py-1 flex items-center gap-1">
+                    <Square size={10} />
+                    DESELECT
+                  </button>
                 ) : (
-                  <div
-                    className="bg-ttd-elevated border border-ttd-border rounded-sm px-2 py-1.5 text-[10px] text-ttd-muted cursor-pointer hover:border-ttd-border-bright transition-colors line-clamp-2"
-                    onClick={() => handleEditPrompt(model)}
-                    title="Click to edit system prompt"
-                  >
-                    {model.systemPrompt || <span className="text-ttd-dim italic">No system prompt — click to set</span>}
-                  </div>
+                  <button onClick={() => void handleSelect(detailModel.id)} disabled={detailModel.status !== 'ready'} className="ttd-btn ttd-btn-green text-[10px] px-3 py-1 flex items-center gap-1 disabled:opacity-40">
+                    <Play size={10} />
+                    SELECT
+                  </button>
                 )}
+                {detailModel.status === 'error' && (
+                  <button
+                    onClick={async () => {
+                      try {
+                        setModels(prev => prev.map(m => m.id === detailModel.id ? { ...m, status: 'loading' } : m));
+                        const payload = await postJson<ModelResponse>(`/models/${detailModel.id}/reload`, {}, true);
+                        setModels(prev => prev.map(m => m.id === detailModel.id ? payload.model : m));
+                        toast.success(`${detailModel.name} reloaded`);
+                      } catch (error) {
+                        toast.error(error instanceof Error ? error.message : 'Reload failed');
+                      }
+                    }}
+                    className="ttd-btn ttd-btn-amber text-[10px] px-3 py-1 flex items-center gap-1"
+                    style={{ borderColor: '#ffaa00', color: '#ffaa00', background: 'rgba(255,170,0,0.1)' }}
+                  >
+                    <RefreshCw size={10} />
+                    RELOAD
+                  </button>
+                )}
+                <button onClick={() => setDeleteConfirm(detailModel.id)} className="ttd-btn ttd-btn-red text-[10px] px-3 py-1 flex items-center gap-1 ml-auto">
+                  <Trash2 size={10} />
+                  DELETE
+                </button>
               </div>
-            )}
-
-            {/* Actions */}
-            <div className="flex items-center gap-2 flex-wrap">
-              {model.selected ? (
-                <button
-                  onClick={() => handleDeselect(model.id)}
-                  className="ttd-btn ttd-btn-ghost text-[10px] px-3 py-1 flex items-center gap-1"
-                >
-                  <Square size={10} />
-                  DESELECT
-                </button>
-              ) : (
-                <button
-                  onClick={() => handleSelect(model.id)}
-                  disabled={model.status !== 'ready'}
-                  className="ttd-btn ttd-btn-green text-[10px] px-3 py-1 flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  <Play size={10} />
-                  SELECT
-                </button>
-              )}
-              {model.type !== 'vision' && editingPrompt !== model.id && (
-                <button
-                  onClick={() => handleEditPrompt(model)}
-                  className="ttd-btn ttd-btn-ghost text-[10px] px-3 py-1 flex items-center gap-1"
-                >
-                  <Terminal size={10} />
-                  PROMPT
-                </button>
-              )}
-              {model.status === 'error' && (
-                <button
-                  onClick={async () => {
-                    try {
-                      setModels(prev => prev.map(m => m.id === model.id ? { ...m, status: 'loading' } : m));
-                      const payload = await postJson<ModelResponse>(`/models/${model.id}/reload`, {}, true);
-                      setModels(prev => prev.map(m => m.id === model.id ? payload.model : m));
-                      toast.success(`${model.name} reloaded`);
-                    } catch (error) {
-                      toast.error(error instanceof Error ? error.message : 'Reload failed');
-                    }
-                  }}
-                  className="ttd-btn ttd-btn-amber text-[10px] px-3 py-1 flex items-center gap-1"
-                  style={{ borderColor: '#ffaa00', color: '#ffaa00', background: 'rgba(255,170,0,0.1)' }}
-                >
-                  <RefreshCw size={10} />
-                  RELOAD
-                </button>
-              )}
-              <button
-                onClick={() => setDeleteConfirm(model.id)}
-                className="ttd-btn ttd-btn-red text-[10px] px-3 py-1 flex items-center gap-1 ml-auto"
-              >
-                <Trash2 size={10} />
-                DELETE
-              </button>
             </div>
-          </div>
-        ))}
-      </div>
-
-      {visibleModels.length === 0 && (
-        <div className="flex flex-col items-center justify-center py-16 text-ttd-muted">
-          <EyeOff size={24} className="mb-3 opacity-30" />
-          <div className="text-sm mb-1">No models visible</div>
-          <div className="text-xs text-ttd-dim mb-3">All models are hidden or no models match your search</div>
-          <button onClick={handleShowAll} className="ttd-btn ttd-btn-green text-xs px-4 py-2">SHOW ALL MODELS</button>
+          )}
         </div>
-      )}
+      </div>
 
       {/* Delete confirm modal */}
       {deleteConfirm && (

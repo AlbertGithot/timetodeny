@@ -1,12 +1,13 @@
 'use client';
 
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { toast } from 'sonner';
 import ChatSidebar from './ChatSidebar';
 import MessageThread from './MessageThread';
 import ChatInputBar from './ChatInputBar';
 import ChatHeader from './ChatHeader';
+import WorkspacePanel from './WorkspacePanel';
 import { getJson, postJson, streamChat } from '@/lib/api';
 
 export type Mode = 'instant' | 'expert';
@@ -59,6 +60,15 @@ interface StreamDonePayload {
   };
 }
 
+function isModelLoadingError(message: string): boolean {
+  const text = message.toLowerCase();
+  return text.includes('503')
+    || text.includes('service unavailable')
+    || text.includes('not ready')
+    || text.includes('still loading')
+    || text.includes('model loading');
+}
+
 export default function ChatInterfaceClient() {
   const searchParams = useSearchParams();
   const initialMode = (searchParams.get('mode') as Mode) || 'instant';
@@ -73,6 +83,10 @@ export default function ChatInterfaceClient() {
   const [chatId, setChatId] = useState<string | null>(searchParams.get('chat'));
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const workspaceRefreshKey = useMemo(
+    () => messages.map(m => `${m.id}:${m.streaming ? '1' : '0'}:${m.generatedFiles?.length || 0}`).join('|'),
+    [messages]
+  );
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -185,17 +199,24 @@ export default function ChatInterfaceClient() {
         return;
       }
       const message = error instanceof Error ? error.message : 'Stream failed';
+      const modelLoading = isModelLoadingError(message);
       setMessages(prev => prev.map(m =>
         m.id === streamingId
           ? {
               ...m,
-              content: `Backend error: ${message}`,
+              content: modelLoading
+                ? 'Model loading. llama.cpp is still warming up; try again in a moment.'
+                : `Backend error: ${message}`,
               streaming: false,
-              testResult: { passed: false, output: message },
+              testResult: modelLoading ? undefined : { passed: false, output: message },
             }
           : m
       ));
-      toast.error(message);
+      if (modelLoading) {
+        toast('Model loading. Wait a moment and retry.');
+      } else {
+        toast.error(message);
+      }
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
       setIsStreaming(false);
@@ -260,6 +281,7 @@ export default function ChatInterfaceClient() {
             onAttachmentsChange={setPendingAttachments}
           />
         </div>
+        <WorkspacePanel chatId={chatId} refreshKey={workspaceRefreshKey} />
       </div>
     </div>
   );

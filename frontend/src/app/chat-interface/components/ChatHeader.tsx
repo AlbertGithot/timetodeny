@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Zap, Brain, ChevronDown, Plus, Shield } from 'lucide-react';
+import { Zap, Brain, ChevronDown, Plus, Shield, Activity } from 'lucide-react';
 import type { Mode } from './ChatInterfaceClient';
 import { getJson } from '@/lib/api';
 
@@ -32,6 +32,16 @@ interface ModelsResponse {
   }>;
 }
 
+interface RuntimeResponse {
+  ok: boolean;
+  runtime: {
+    state: 'ready' | 'loading' | 'offline' | 'error';
+    label: string;
+    selectedModel?: string | null;
+    health?: string | null;
+  };
+}
+
 interface Props {
   mode: Mode;
   onModeChange: (m: Mode) => void;
@@ -46,6 +56,7 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
   const router = useRouter();
   const [modelDropOpen, setModelDropOpen] = useState(false);
   const [models, setModels] = useState<AvailableModel[]>([]);
+  const [runtime, setRuntime] = useState<RuntimeResponse['runtime'] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -77,6 +88,40 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
       .catch(() => undefined);
     return () => { cancelled = true; };
   }, [activeModel, onModelChange]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadRuntime = () => {
+      getJson<RuntimeResponse>('/runtime')
+        .then((payload) => {
+          if (!cancelled) setRuntime(payload.runtime);
+        })
+        .catch(() => {
+          if (!cancelled) setRuntime({ state: 'error', label: 'runtime error' });
+        });
+    };
+    loadRuntime();
+    const timer = window.setInterval(loadRuntime, isStreaming ? 2000 : 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [isStreaming]);
+
+  const runtimeState = isStreaming ? 'generating' : runtime?.state || 'offline';
+  const runtimeLabel = isStreaming ? 'generating' : runtime?.label || 'offline';
+  const runtimeClass = runtimeState === 'generating'
+    ? 'text-ttd-cyan border-ttd-cyan/30 bg-ttd-cyan/5'
+    : runtimeState === 'ready'
+    ? 'text-ttd-green border-ttd-green/30 bg-ttd-green/5'
+    : runtimeState === 'loading'
+    ? 'text-ttd-amber border-ttd-amber/30 bg-ttd-amber/5'
+    : 'text-ttd-red border-ttd-red/30 bg-ttd-red/5';
+  const runtimeDot = runtimeState === 'ready'
+    ? 'status-dot-green'
+    : runtimeState === 'generating'
+    ? ''
+    : 'status-dot-dim';
 
   return (
     <div className="flex items-center gap-3 px-4 py-2 border-b border-ttd-border bg-ttd-surface/80 backdrop-blur-sm z-30 flex-shrink-0">
@@ -127,6 +172,15 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
           <Brain size={11} />
           EXPERT
         </button>
+      </div>
+
+      <div
+        className={`hidden lg:flex items-center gap-2 border rounded-sm px-2.5 py-1.5 text-[10px] uppercase tracking-wider ${runtimeClass}`}
+        title={runtime?.health || runtimeLabel}
+      >
+        <Activity size={11} />
+        <span className={`status-dot ${runtimeDot}`} />
+        <span>{runtimeLabel}</span>
       </div>
 
       {/* Model selector */}

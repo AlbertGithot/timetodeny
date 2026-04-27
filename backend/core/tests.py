@@ -260,6 +260,14 @@ class ApiSmokeTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["health"], "/api/health")
 
+    def test_public_runtime_status_is_safe_for_chat_header(self) -> None:
+        response = self.client.get("/api/runtime")
+        self.assertEqual(response.status_code, 200)
+        runtime = response.json()["runtime"]
+        self.assertIn(runtime["state"], {"ready", "loading", "offline"})
+        self.assertNotIn("modelPath", runtime)
+        self.assertNotIn("logTail", runtime)
+
     def test_chat_stream_has_no_default_prompt_limit(self) -> None:
         with override_settings(TTD_MAX_PROMPT_CHARS=0):
             response = self.client.post(

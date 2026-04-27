@@ -7,6 +7,7 @@ from core import views
 urlpatterns = [
     path("api", views.api_index),
     path("api/health", views.health),
+    path("api/runtime", views.runtime_status),
     path("api/chats", views.chats_collection),
     path("api/chats/<uuid:chat_id>", views.chat_detail),
     path("api/chat/stream", views.chat_stream),

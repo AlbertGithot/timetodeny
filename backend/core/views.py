@@ -204,6 +204,53 @@ def health(request: HttpRequest):
     )
 
 
+def runtime_status(request: HttpRequest):
+    ensure_defaults()
+    sync_model_registry_with_files()
+    selected = ModelRegistry.objects.filter(selected=True, status="ready").first()
+    if settings.TTD_MODEL_BACKEND not in {"llamacpp", "llama.cpp"}:
+        return json_response(
+            {
+                "ok": True,
+                "runtime": {
+                    "backend": settings.TTD_MODEL_BACKEND,
+                    "state": "ready",
+                    "label": "mock ready",
+                    "selectedModel": selected.name if selected else "mock",
+                },
+            }
+        )
+
+    runtime = llama_runtime_status()
+    if not selected:
+        state = "offline"
+        label = "no model"
+    elif runtime.get("ready"):
+        state = "ready"
+        label = "ready"
+    elif runtime.get("portOpen"):
+        state = "loading"
+        label = "model loading"
+    else:
+        state = "offline"
+        label = "offline"
+
+    return json_response(
+        {
+            "ok": True,
+            "runtime": {
+                "backend": runtime.get("backend"),
+                "state": state,
+                "label": label,
+                "selectedModel": runtime.get("selectedModel") or (selected.name if selected else None),
+                "portOpen": runtime.get("portOpen"),
+                "ready": runtime.get("ready"),
+                "health": runtime.get("health"),
+            },
+        }
+    )
+
+
 @csrf_exempt
 def chats_collection(request: HttpRequest):
     ensure_defaults()
