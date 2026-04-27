@@ -634,6 +634,7 @@ def stream_generation_updates(chat: Chat, assistant: Message, log: RequestLog, *
     last_content = ""
     last_status = ""
     last_progress = -1
+    last_heartbeat = 0.0
     inline_ran = False
     while True:
         if run_inline and not inline_ran:
@@ -647,9 +648,16 @@ def stream_generation_updates(chat: Chat, assistant: Message, log: RequestLog, *
 
         status_payload = status_event_payload(current)
         status_key = f"{status_payload['status']}:{status_payload['phase']}:{status_payload['activity']}"
-        if status_key != last_status or status_payload["progress"] != last_progress:
+        now = time.monotonic()
+        should_send_status = (
+            status_key != last_status
+            or status_payload["progress"] != last_progress
+            or now - last_heartbeat >= 5
+        )
+        if should_send_status:
             last_status = status_key
             last_progress = status_payload["progress"]
+            last_heartbeat = now
             yield sse("status", status_payload)
 
         if current.content.startswith(last_content):
@@ -751,6 +759,11 @@ def chat_stream(request: HttpRequest):
         "started": started,
     }
 
+    run_inline = connection.in_atomic_block
+    if not run_inline:
+        thread = threading.Thread(target=run_chat_generation_job, kwargs=job_kwargs, daemon=True)
+        thread.start()
+
     def generate():
         queued = queue_status()["busy"]
         yield sse(
@@ -763,12 +776,10 @@ def chat_stream(request: HttpRequest):
                 "queued": queued,
             },
         )
-        if connection.in_atomic_block:
+        if run_inline:
             yield from stream_generation_updates(chat, assistant, log, run_inline=lambda: run_chat_generation_job(**job_kwargs))
             return
 
-        thread = threading.Thread(target=run_chat_generation_job, kwargs=job_kwargs, daemon=True)
-        thread.start()
         yield from stream_generation_updates(chat, assistant, log)
 
     response = StreamingHttpResponse(generate(), content_type="text/event-stream")

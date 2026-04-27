@@ -75,6 +75,16 @@ function isModelLoadingError(message: string): boolean {
     || text.includes('model loading');
 }
 
+function isNetworkStreamError(message: string): boolean {
+  const text = message.toLowerCase();
+  return text.includes('failed to fetch')
+    || text.includes('networkerror')
+    || text.includes('network error')
+    || text.includes('load failed')
+    || text.includes('terminated')
+    || text.includes('connection closed');
+}
+
 export default function ChatInterfaceClient() {
   const searchParams = useSearchParams();
   const initialMode = (searchParams.get('mode') as Mode) || 'instant';
@@ -179,6 +189,8 @@ export default function ChatInterfaceClient() {
 
     let accumulated = '';
     let assistantMessageId = streamingId;
+    let knownChatId = chatId;
+    let keepWatchingSavedGeneration = false;
     const controller = new AbortController();
     abortRef.current = controller;
     try {
@@ -192,7 +204,10 @@ export default function ChatInterfaceClient() {
         },
         {
           onMeta: (data) => {
-            if (typeof data.chatId === 'string') setChatId(data.chatId);
+            if (typeof data.chatId === 'string') {
+              knownChatId = data.chatId;
+              setChatId(data.chatId);
+            }
             if (typeof data.assistantMessageId === 'string') {
               assistantMessageId = data.assistantMessageId;
               setMessages(prev => prev.map(m =>
@@ -257,6 +272,34 @@ export default function ChatInterfaceClient() {
       }
       const message = error instanceof Error ? error.message : 'Stream failed';
       const modelLoading = isModelLoadingError(message);
+      const networkStreamError = isNetworkStreamError(message);
+      if (networkStreamError && knownChatId) {
+        keepWatchingSavedGeneration = true;
+        setChatId(knownChatId);
+        try {
+          const payload = await getJson<ChatDetailResponse>(`/chats/${knownChatId}`);
+          const nextMessages = payload.chat.messages || [];
+          setMessages(nextMessages);
+          setIsStreaming(nextMessages.some(m => m.streaming));
+        } catch {
+          setMessages(prev => prev.map(m =>
+            m.id === assistantMessageId
+              ? {
+                  ...m,
+                  streaming: true,
+                  generation: {
+                    status: 'streaming',
+                    phase: 'reconnect',
+                    activity: 'Соединение со стримом оборвалось. Подхватываю сохраненную генерацию...',
+                    progress: Math.max(5, m.generation?.progress || 5),
+                  },
+                }
+              : m
+          ));
+        }
+        toast('Соединение со стримом оборвалось. Подхватываю сохраненную генерацию.');
+        return;
+      }
       setMessages(prev => prev.map(m =>
         m.id === assistantMessageId
           ? {
@@ -276,7 +319,7 @@ export default function ChatInterfaceClient() {
       }
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
-      setIsStreaming(false);
+      if (!keepWatchingSavedGeneration) setIsStreaming(false);
     }
   }, [activeModel, chatId, mode]);
 
