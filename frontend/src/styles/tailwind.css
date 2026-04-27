@@ -404,6 +404,35 @@
     font-weight: 800;
   }
 
+  .assistant-heading {
+    color: #f4fff9;
+    font-weight: 800;
+    line-height: 1.25;
+    margin: 12px 0 6px;
+  }
+
+  .assistant-heading:first-child {
+    margin-top: 0;
+  }
+
+  .assistant-heading-1 {
+    font-size: 19px;
+  }
+
+  .assistant-heading-2 {
+    font-size: 17px;
+  }
+
+  .assistant-heading-3 {
+    font-size: 15px;
+    color: var(--accent-green);
+  }
+
+  .assistant-heading-4 {
+    font-size: 14px;
+    color: var(--accent-cyan);
+  }
+
   .inline-math {
     display: inline-block;
     min-width: 0.65em;

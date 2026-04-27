@@ -242,6 +242,19 @@ function renderInlineMarkdown(text: string, keyPrefix = 'inline'): React.ReactNo
   });
 }
 
+function renderMarkdownLine(line: string, keyPrefix: string): React.ReactNode {
+  const heading = /^(#{1,4})\s+(.+)$/.exec(line.trim());
+  if (heading) {
+    const level = heading[1].length;
+    return (
+      <div className={`assistant-heading assistant-heading-${level}`}>
+        {renderInlineMarkdown(heading[2], `${keyPrefix}-heading`)}
+      </div>
+    );
+  }
+  return renderInlineMarkdown(line, keyPrefix);
+}
+
 function RichText({ text, streaming }: { text: string; streaming?: boolean }) {
   const paragraphs = text.split(/\n{2,}/).filter(Boolean);
   if (paragraphs.length === 0) return null;
@@ -252,7 +265,7 @@ function RichText({ text, streaming }: { text: string; streaming?: boolean }) {
         <p key={index}>
           {paragraph.split('\n').map((line, lineIndex, lines) => (
             <React.Fragment key={`${index}-${lineIndex}`}>
-              {renderInlineMarkdown(line, `${index}-${lineIndex}`)}
+              {renderMarkdownLine(line, `${index}-${lineIndex}`)}
               {lineIndex < lines.length - 1 && <br />}
             </React.Fragment>
           ))}
