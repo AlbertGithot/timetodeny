@@ -90,6 +90,9 @@ STATIC_URL = "static/"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = Path(os.environ.get("TTD_MEDIA_ROOT", BACKEND_DIR / "media"))
 TTD_FRONTEND_BUILD_ROOT = Path(os.environ.get("TTD_FRONTEND_BUILD_ROOT", PROJECT_ROOT / "frontend" / "out"))
+TTD_FRONTEND_DIR = Path(os.environ.get("TTD_FRONTEND_DIR", PROJECT_ROOT / "frontend"))
+TTD_AUTO_BUILD_FRONTEND = os.environ.get("TTD_AUTO_BUILD_FRONTEND", "1") != "0"
+TTD_FRONTEND_BUILD_TIMEOUT_SECONDS = int(os.environ.get("TTD_FRONTEND_BUILD_TIMEOUT_SECONDS", "240"))
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 

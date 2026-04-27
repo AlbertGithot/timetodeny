@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import csv
+import html as html_lib
 import mimetypes
+import os
+import shutil
+import subprocess
+import threading
 import time
 from io import StringIO
 from pathlib import Path, PurePosixPath
@@ -54,6 +59,9 @@ from .workspaces import (
 
 
 _LOGIN_FAILURES: dict[str, list[float]] = {}
+_FRONTEND_BUILD_LOCK = threading.Lock()
+_FRONTEND_BUILD_ATTEMPTED = False
+_FRONTEND_BUILD_ERROR = ""
 
 
 def index(request: HttpRequest):
@@ -88,7 +96,79 @@ def _frontend_build_root() -> Path:
     return settings.TTD_FRONTEND_BUILD_ROOT.resolve()
 
 
+def _frontend_dir() -> Path:
+    return settings.TTD_FRONTEND_DIR.resolve()
+
+
+def _find_npm_executable() -> str | None:
+    local_node_bin = settings.PROJECT_ROOT / ".runtime" / "node" / "current" / "bin"
+    local_npm = local_node_bin / "npm"
+    if local_npm.is_file():
+        return str(local_npm)
+    return shutil.which("npm")
+
+
+def _ensure_frontend_export_available() -> bool:
+    global _FRONTEND_BUILD_ATTEMPTED, _FRONTEND_BUILD_ERROR
+
+    build_root = _frontend_build_root()
+    if (build_root / "index.html").is_file():
+        return True
+
+    if not settings.TTD_AUTO_BUILD_FRONTEND:
+        return False
+
+    with _FRONTEND_BUILD_LOCK:
+        if (build_root / "index.html").is_file():
+            return True
+        if _FRONTEND_BUILD_ATTEMPTED:
+            return False
+
+        _FRONTEND_BUILD_ATTEMPTED = True
+        frontend_dir = _frontend_dir()
+        package_json = frontend_dir / "package.json"
+        npm = _find_npm_executable()
+        if not package_json.is_file():
+            _FRONTEND_BUILD_ERROR = f"package.json not found in {frontend_dir}"
+            return False
+        if not npm:
+            _FRONTEND_BUILD_ERROR = "npm was not found in PATH or .runtime/node/current/bin"
+            return False
+
+        env = os.environ.copy()
+        local_node_bin = settings.PROJECT_ROOT / ".runtime" / "node" / "current" / "bin"
+        if local_node_bin.is_dir():
+            env["PATH"] = f"{local_node_bin}{os.pathsep}{env.get('PATH', '')}"
+        env.setdefault("NEXT_PUBLIC_API_BASE", "/api")
+
+        try:
+            result = subprocess.run(
+                [npm, "run", "build"],
+                cwd=frontend_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=settings.TTD_FRONTEND_BUILD_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            _FRONTEND_BUILD_ERROR = str(exc)
+            return False
+
+        if result.returncode != 0:
+            output = (result.stderr or result.stdout or "npm run build failed").strip()
+            _FRONTEND_BUILD_ERROR = output[-4000:]
+            return False
+
+        if not (build_root / "index.html").is_file():
+            _FRONTEND_BUILD_ERROR = f"npm run build finished, but {build_root / 'index.html'} was not created"
+            return False
+
+        _FRONTEND_BUILD_ERROR = ""
+        return True
+
+
 def _resolve_frontend_file(request_path: str) -> Path | None:
+    _ensure_frontend_export_available()
     build_root = _frontend_build_root()
     if not build_root.exists():
         return None
@@ -152,6 +232,9 @@ def _serve_frontend_file(file_path: Path, status: int = 200) -> FileResponse:
 def _frontend_unavailable_response(request: HttpRequest, status: int = 503) -> HttpResponse:
     public_frontend_origin = _public_frontend_origin(request)
     build_root = _frontend_build_root()
+    build_error = ""
+    if _FRONTEND_BUILD_ERROR:
+        build_error = f"<p>Auto-build error: <code>{html_lib.escape(_FRONTEND_BUILD_ERROR)}</code></p>"
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -173,6 +256,7 @@ def _frontend_unavailable_response(request: HttpRequest, status: int = 503) -> H
       <h1>Frontend build is unavailable</h1>
       <p>Django is reachable on <code>{public_frontend_origin}</code>, but the exported frontend files were not found under <code>{build_root}</code>.</p>
       <p>Run <code>./linux.sh start</code> or <code>npm run build</code> in <code>frontend/</code> and then try again.</p>
+      {build_error}
       <p>API health stays available at <a href="/api/health">/api/health</a>.</p>
       <p>Requested path: <code>{request.path}</code></p>
     </main>

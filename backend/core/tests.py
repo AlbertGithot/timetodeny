@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 from pathlib import Path
 from urllib.error import HTTPError
@@ -254,6 +255,38 @@ class ApiSmokeTests(TestCase):
         response = self.client.get("/_next/static/app.js")
         self.assertEqual(response.status_code, 200)
         self.assertIn("javascript", response["Content-Type"])
+
+    def test_missing_frontend_export_auto_builds_once(self) -> None:
+        from core import views
+
+        frontend_dir = tempfile.TemporaryDirectory()
+        build_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(frontend_dir.cleanup)
+        self.addCleanup(build_dir.cleanup)
+        frontend_path = Path(frontend_dir.name)
+        build_path = Path(build_dir.name)
+        (frontend_path / "package.json").write_text('{"scripts":{"build":"next build"}}', encoding="utf-8")
+        views._FRONTEND_BUILD_ATTEMPTED = False
+        views._FRONTEND_BUILD_ERROR = ""
+
+        def fake_build(*args, **kwargs):
+            build_path.mkdir(parents=True, exist_ok=True)
+            (build_path / "index.html").write_text("<html><body>rebuilt ui</body></html>", encoding="utf-8")
+            return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+        with override_settings(
+            TTD_FRONTEND_BUILD_ROOT=build_path,
+            TTD_FRONTEND_DIR=frontend_path,
+            TTD_AUTO_BUILD_FRONTEND=True,
+        ):
+            with patch("core.views._find_npm_executable", return_value="/usr/bin/npm"), patch("core.views.subprocess.run", side_effect=fake_build) as build:
+                response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "rebuilt ui")
+        build.assert_called_once()
+        views._FRONTEND_BUILD_ATTEMPTED = False
+        views._FRONTEND_BUILD_ERROR = ""
 
     def test_api_index_explains_backend(self) -> None:
         response = self.client.get("/api")
