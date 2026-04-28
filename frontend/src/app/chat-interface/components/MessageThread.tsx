@@ -255,22 +255,53 @@ function renderMarkdownLine(line: string, keyPrefix: string): React.ReactNode {
   return renderInlineMarkdown(line, keyPrefix);
 }
 
+function isHeadingLine(line: string): boolean {
+  return /^(#{1,4})\s+.+$/.test(line.trim());
+}
+
 function RichText({ text, streaming }: { text: string; streaming?: boolean }) {
-  const paragraphs = text.split(/\n{2,}/).filter(Boolean);
-  if (paragraphs.length === 0) return null;
+  const blocks: React.ReactNode[] = [];
+  const paragraphLines: string[] = [];
+
+  const flushParagraph = () => {
+    if (paragraphLines.length === 0) return;
+    const blockIndex = blocks.length;
+    blocks.push(
+      <p key={`p-${blockIndex}`}>
+        {paragraphLines.map((line, lineIndex) => (
+          <React.Fragment key={`${blockIndex}-${lineIndex}`}>
+            {renderInlineMarkdown(line, `${blockIndex}-${lineIndex}`)}
+            {lineIndex < paragraphLines.length - 1 && <br />}
+          </React.Fragment>
+        ))}
+      </p>
+    );
+    paragraphLines.length = 0;
+  };
+
+  text.split('\n').forEach((line) => {
+    if (!line.trim()) {
+      flushParagraph();
+      return;
+    }
+    if (isHeadingLine(line)) {
+      flushParagraph();
+      blocks.push(
+        <React.Fragment key={`heading-${blocks.length}`}>
+          {renderMarkdownLine(line, `heading-${blocks.length}`)}
+        </React.Fragment>
+      );
+      return;
+    }
+    paragraphLines.push(line);
+  });
+  flushParagraph();
+
+  if (blocks.length === 0) return null;
 
   return (
     <div className={`assistant-rich-text ${streaming ? 'streaming-cursor' : ''}`}>
-      {paragraphs.map((paragraph, index) => (
-        <p key={index}>
-          {paragraph.split('\n').map((line, lineIndex, lines) => (
-            <React.Fragment key={`${index}-${lineIndex}`}>
-              {renderMarkdownLine(line, `${index}-${lineIndex}`)}
-              {lineIndex < lines.length - 1 && <br />}
-            </React.Fragment>
-          ))}
-        </p>
-      ))}
+      {blocks}
     </div>
   );
 }
