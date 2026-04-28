@@ -252,6 +252,11 @@ class ApiSmokeTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "panel")
 
+    def test_short_admin_route_serves_admin_panel(self) -> None:
+        response = self.client.get("/admin")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "panel")
+
     def test_exported_static_asset_is_served(self) -> None:
         response = self.client.get("/_next/static/app.js")
         self.assertEqual(response.status_code, 200)

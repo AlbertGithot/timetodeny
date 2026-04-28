@@ -177,6 +177,12 @@ def _resolve_frontend_file(request_path: str) -> Path | None:
 
     normalized = (request_path or "/").split("?", 1)[0]
     normalized = normalized.lstrip("/")
+    route_aliases = {
+        "admin": "admin-panel",
+        "chat": "chat-interface",
+        "welcome": "welcome-screen",
+    }
+    normalized = route_aliases.get(normalized.rstrip("/"), normalized)
     candidates: list[str] = []
 
     if not normalized:
