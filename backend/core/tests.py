@@ -4,6 +4,8 @@ import json
 import socket
 import subprocess
 import tempfile
+import zipfile
+from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError
 from unittest.mock import patch
@@ -341,6 +343,7 @@ class ApiSmokeTests(TestCase):
                 data=json.dumps({"path": "app.py"}),
                 content_type="application/json",
             )
+            tree_after_test = self.client.get(f"/api/workspaces/{chat.id}")
             rollback = self.client.post(
                 f"/api/workspaces/{chat.id}/rollback",
                 data=json.dumps({"path": "app.py"}),
@@ -357,9 +360,13 @@ class ApiSmokeTests(TestCase):
         self.assertIn("+print('two')", diff.json()["diff"]["diff"])
         self.assertEqual(test_run.status_code, 200)
         self.assertTrue(test_run.json()["result"]["passed"])
+        self.assertFalse((Path(generated_dir.name) / "workspaces" / str(chat.id) / "__pycache__").exists())
+        self.assertNotIn("__pycache__", json.dumps(tree_after_test.json()["workspace"]))
         self.assertEqual(rollback.status_code, 200)
         self.assertEqual(rollback.json()["file"]["content"], "print('one')\n")
         self.assertEqual(archive.status_code, 200)
+        with zipfile.ZipFile(BytesIO(b"".join(archive.streaming_content))) as zipped:
+            self.assertEqual(zipped.namelist(), ["app.py"])
 
     def test_model_file_artifact_parser_writes_workspace_file(self) -> None:
         generated_dir = tempfile.TemporaryDirectory()

@@ -4,6 +4,7 @@ import html
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import time
@@ -256,12 +257,18 @@ console.log(runTask(process.argv.slice(2).join(' ')));
 
 def test_generated_file(path: Path, language: str) -> tuple[bool, str]:
     if language == "python":
+        env = os.environ.copy()
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         proc = subprocess.run(
-            ["python3", "-m", "py_compile", str(path)],
+            ["python3", "-B", "-m", "py_compile", str(path)],
             capture_output=True,
+            env=env,
             text=True,
             timeout=20,
         )
+        pycache = path.parent / "__pycache__"
+        if pycache.exists():
+            shutil.rmtree(pycache, ignore_errors=True)
         if proc.returncode == 0:
             return True, "python -m py_compile: OK"
         return False, (proc.stderr or proc.stdout or "py_compile failed").strip()

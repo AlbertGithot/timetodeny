@@ -10,6 +10,20 @@ from uuid import UUID
 from django.conf import settings
 
 
+IGNORED_DIR_NAMES = {
+    ".git",
+    ".mypy_cache",
+    ".next",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".versions",
+    "__pycache__",
+    "node_modules",
+}
+IGNORED_FILE_NAMES = {".DS_Store"}
+IGNORED_FILE_SUFFIXES = {".pyc", ".pyo"}
+
+
 def workspace_root(chat_id: str | UUID) -> Path:
     root = Path(settings.TTD_GENERATED_DIR) / "workspaces" / str(chat_id)
     root.mkdir(parents=True, exist_ok=True)
@@ -33,13 +47,21 @@ def safe_relative_path(value: str) -> Path:
     return Path(*relative.parts)
 
 
+def is_ignored_workspace_path(relative_path: Path) -> bool:
+    parts = relative_path.parts
+    if any(part in IGNORED_DIR_NAMES for part in parts):
+        return True
+    return relative_path.name in IGNORED_FILE_NAMES or relative_path.suffix in IGNORED_FILE_SUFFIXES
+
+
 def safe_workspace_path(chat_id: str | UUID, relative_path: str) -> Path:
     root = workspace_root(chat_id)
-    path = (root / safe_relative_path(relative_path)).resolve()
+    rel = safe_relative_path(relative_path)
+    if is_ignored_workspace_path(rel):
+        raise ValueError("workspace internals are not exposed")
+    path = (root / rel).resolve()
     if path != root and root not in path.parents:
         raise ValueError("unsafe path")
-    if ".versions" in path.relative_to(root).parts:
-        raise ValueError("version internals are not exposed")
     return path
 
 
@@ -91,7 +113,7 @@ def list_workspace_tree(chat_id: str | UUID) -> dict:
     dirs = set()
     for path in sorted(root.rglob("*")):
         rel = path.relative_to(root)
-        if ".versions" in rel.parts:
+        if is_ignored_workspace_path(rel):
             continue
         if path.is_dir():
             dirs.add(rel.as_posix())
@@ -162,7 +184,7 @@ def create_workspace_zip(chat_id: str | UUID) -> Path:
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(root.rglob("*")):
             rel = path.relative_to(root)
-            if ".versions" in rel.parts or not path.is_file():
+            if is_ignored_workspace_path(rel) or not path.is_file():
                 continue
             archive.write(path, rel.as_posix())
     return target

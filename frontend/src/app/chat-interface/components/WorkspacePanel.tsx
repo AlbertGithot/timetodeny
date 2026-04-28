@@ -8,6 +8,8 @@ import {
   FileCode,
   Folder,
   GitCompare,
+  PanelRightClose,
+  PanelRightOpen,
   Play,
   RefreshCw,
   RotateCcw,
@@ -90,6 +92,7 @@ function languageLabel(path: string): string {
 
 export default function WorkspacePanel({ chatId, refreshKey }: Props) {
   const [files, setFiles] = useState<WorkspaceFile[]>([]);
+  const [collapsed, setCollapsed] = useState(false);
   const [selectedPath, setSelectedPath] = useState<string>('');
   const [content, setContent] = useState('');
   const [originalContent, setOriginalContent] = useState('');
@@ -146,6 +149,23 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
       })
       .catch(() => undefined)
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    try {
+      setCollapsed(window.localStorage.getItem('ttd_workspace_panel_collapsed') === '1');
+    } catch {
+      setCollapsed(false);
+    }
+  }, []);
+
+  const setPanelCollapsed = (value: boolean) => {
+    setCollapsed(value);
+    try {
+      window.localStorage.setItem('ttd_workspace_panel_collapsed', value ? '1' : '0');
+    } catch {
+      // localStorage can be unavailable in strict browser modes.
+    }
   };
 
   useEffect(() => {
@@ -263,14 +283,39 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
     return null;
   }
 
+  if (collapsed) {
+    return (
+      <aside className="hidden xl:flex w-12 flex-shrink-0 border-l border-ttd-border bg-ttd-surface/70 flex-col items-center py-3 gap-3">
+        <button
+          type="button"
+          onClick={() => setPanelCollapsed(false)}
+          className="w-8 h-8 flex items-center justify-center rounded-sm border border-ttd-border hover:border-ttd-cyan/45 hover:bg-ttd-elevated transition-colors"
+          title="Show Files panel"
+        >
+          <PanelRightOpen size={14} className="text-ttd-cyan" />
+        </button>
+        <div
+          className="text-[10px] font-bold tracking-wider text-ttd-muted select-none"
+          style={{ writingMode: 'vertical-rl' }}
+        >
+          FILES
+        </div>
+        <div className="mt-auto text-[10px] text-ttd-green font-mono">{files.length}</div>
+      </aside>
+    );
+  }
+
   return (
     <aside className="hidden xl:flex w-[440px] 2xl:w-[520px] flex-shrink-0 border-l border-ttd-border bg-ttd-surface/70 flex-col overflow-hidden">
       <div className="px-4 py-3 border-b border-ttd-border flex items-center gap-2">
         <FileCode size={13} className="text-ttd-cyan" />
-        <span className="text-xs font-bold tracking-wider text-ttd-text">WORKSPACE</span>
+        <span className="text-xs font-bold tracking-wider text-ttd-text">FILES</span>
         <span className="text-[10px] text-ttd-muted">{files.length} files</span>
         {dirty && <span className="text-[10px] text-ttd-amber">unsaved</span>}
-        <button onClick={loadWorkspace} className="ml-auto w-7 h-7 flex items-center justify-center rounded-sm hover:bg-ttd-elevated" title="Refresh files">
+        <button onClick={() => setPanelCollapsed(true)} className="ml-auto w-7 h-7 flex items-center justify-center rounded-sm hover:bg-ttd-elevated" title="Hide Files panel">
+          <PanelRightClose size={12} className="text-ttd-muted" />
+        </button>
+        <button onClick={loadWorkspace} className="w-7 h-7 flex items-center justify-center rounded-sm hover:bg-ttd-elevated" title="Refresh files">
           <RefreshCw size={12} className={loading ? 'text-ttd-cyan animate-spin' : 'text-ttd-muted'} />
         </button>
         <button onClick={handleZip} className="w-7 h-7 flex items-center justify-center rounded-sm hover:bg-ttd-elevated" title="Download workspace ZIP">
