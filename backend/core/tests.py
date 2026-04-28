@@ -647,6 +647,8 @@ print('hi')
         self.assertEqual(payload["messages"][2]["role"], "user")
         self.assertEqual(payload["messages"][2]["content"], "Say hello")
         self.assertIn("same language", payload["messages"][0]["content"])
+        self.assertIn("pragmatic coding agent", payload["messages"][0]["content"])
+        self.assertIn("Do not claim that you directly opened a shell", payload["messages"][0]["content"])
         self.assertIn("ttd-file", payload["messages"][0]["content"])
         self.assertNotIn("max_tokens", payload)
 
