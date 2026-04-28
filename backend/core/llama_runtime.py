@@ -214,6 +214,12 @@ def llama_runtime_status() -> dict:
         "binaryExists": bool(binary),
         "logFile": str(_log_file()),
         "logTail": _log_tail(),
+        "settings": {
+            "contextSize": selected.llama_context_size if selected and selected.llama_context_size else settings.TTD_LLAMA_CPP_CTX_SIZE,
+            "threads": selected.llama_threads if selected and selected.llama_threads else None,
+            "gpuLayers": selected.llama_gpu_layers if selected and selected.llama_gpu_layers >= 0 else None,
+            "promptCache": selected.prompt_cache_enabled if selected else True,
+        },
     }
 
 
@@ -251,8 +257,14 @@ def ensure_llama_server(model: ModelRegistry | None = None) -> None:
         "--port",
         str(port),
         "-c",
-        str(settings.TTD_LLAMA_CPP_CTX_SIZE),
+        str(model.llama_context_size if model and model.llama_context_size else settings.TTD_LLAMA_CPP_CTX_SIZE),
     ]
+    threads = model.llama_threads if model and model.llama_threads else 0
+    if threads > 0:
+        cmd.extend(["-t", str(threads)])
+    gpu_layers = model.llama_gpu_layers if model else -1
+    if gpu_layers >= 0:
+        cmd.extend(["-ngl", str(gpu_layers)])
 
     proc = subprocess.Popen(
         cmd,

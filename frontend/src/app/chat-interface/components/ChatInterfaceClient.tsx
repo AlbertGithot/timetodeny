@@ -113,7 +113,7 @@ export default function ChatInterfaceClient() {
   const [mode, setMode] = useState<Mode>(initialMode);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [activeModel, setActiveModel] = useState('local-assistant');
+  const [activeModel, setActiveModel] = useState('__auto__');
   const [inputValue, setInputValue] = useState('');
   const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
   const [chatId, setChatId] = useState<string | null>(searchParams.get('chat'));
@@ -142,7 +142,7 @@ export default function ChatInterfaceClient() {
         setMessages(nextMessages);
         setIsStreaming(nextMessages.some(m => m.streaming));
         setMode(payload.chat.mode || initialMode);
-        setActiveModel(payload.chat.model || 'local-assistant');
+        setActiveModel(payload.chat.model || '__auto__');
         const streaming = latestStreamingAssistant(nextMessages);
         if (streaming) publishTrackedMessage(payload.chat.id, streaming);
         else clearTrackedGeneration(payload.chat.id);

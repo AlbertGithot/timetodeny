@@ -127,6 +127,19 @@ class ModelRegistry(TimeStampedModel):
     quantization = models.CharField(max_length=64, default="Q4_K_M")
     download_progress = models.PositiveSmallIntegerField(default=0)
     local_path = models.CharField(max_length=500, blank=True)
+    auto_select = models.BooleanField(default=True)
+    use_for_instant = models.BooleanField(default=True)
+    use_for_expert = models.BooleanField(default=True)
+    instant_context_messages = models.PositiveSmallIntegerField(default=4)
+    expert_context_messages = models.PositiveSmallIntegerField(default=12)
+    instant_max_tokens = models.PositiveIntegerField(default=512)
+    expert_max_tokens = models.PositiveIntegerField(default=2048)
+    llama_context_size = models.PositiveIntegerField(default=0)
+    llama_threads = models.PositiveIntegerField(default=0)
+    llama_gpu_layers = models.IntegerField(default=-1)
+    prompt_cache_enabled = models.BooleanField(default=True)
+    run_tests = models.BooleanField(default=True)
+    max_test_files = models.PositiveSmallIntegerField(default=2)
 
     class Meta:
         ordering = ["-selected", "hidden", "name"]

@@ -122,6 +122,10 @@ def language_from_filename(filename: str, fallback: str = "text") -> str:
     }.get(ext, fallback)
 
 
+def should_test_generated_file(language: str) -> bool:
+    return language in {"python", "html", "json"}
+
+
 def artifact_protocol_prompt() -> str:
     return """You can create real workspace files when that is the right way to satisfy the user.
 Decide yourself whether the user needs normal chat text or one or more files.
@@ -281,6 +285,13 @@ def test_generated_file(path: Path, language: str) -> tuple[bool, str]:
         passed = "<html" in content.lower() and "</html>" in content.lower()
         return passed, "HTML smoke check: OK" if passed else "HTML smoke check failed"
 
+    if language == "json":
+        try:
+            json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return False, f"JSON parse failed: {exc}"
+        return True, "JSON parse check: OK"
+
     return True, "File write smoke check: OK"
 
 
@@ -305,6 +316,8 @@ def create_model_file_artifacts(
     chat_id: str,
     *,
     allow_fallback: bool = False,
+    run_tests: bool = True,
+    max_test_files: int = 2,
 ) -> tuple[list[ArtifactDraft], bool | None, str, str]:
     from .workspaces import write_workspace_file
 
@@ -312,6 +325,7 @@ def create_model_file_artifacts(
     test_outputs: list[str] = []
     passed_values: list[bool] = []
     consumed_ranges: list[tuple[int, int]] = []
+    tested_files = 0
 
     explicit_pattern = re.compile(
         r"```(?:ttd-file|file)\s+(?:path=)?[\"']?(?P<path>[^\"'\n`]+)[\"']?\s*\n(?P<content>.*?)```",
@@ -325,7 +339,11 @@ def create_model_file_artifacts(
         relative_path = _safe_generated_relative_path(raw_path, infer_file(prompt)[0])
         language = language_from_filename(relative_path)
         disk_path = write_workspace_file(chat_id, relative_path, content)
-        passed, output = test_generated_file(disk_path, language)
+        if run_tests and should_test_generated_file(language) and tested_files < max_test_files:
+            passed, output = test_generated_file(disk_path, language)
+            tested_files += 1
+        else:
+            passed, output = True, "Test skipped by model registry policy."
         artifacts.append(ArtifactDraft(name=relative_path, language=language, content=content, file_type="code", disk_path=str(disk_path)))
         passed_values.append(passed)
         test_outputs.append(f"{relative_path}: {output}")
@@ -339,7 +357,11 @@ def create_model_file_artifacts(
             content = match.group("content").strip("\n")
             language = language_from_filename(fallback_name, match.group("language") or fallback_language)
             disk_path = write_workspace_file(chat_id, fallback_name, content)
-            passed, output = test_generated_file(disk_path, language)
+            if run_tests and should_test_generated_file(language) and tested_files < max_test_files:
+                passed, output = test_generated_file(disk_path, language)
+                tested_files += 1
+            else:
+                passed, output = True, "Test skipped by model registry policy."
             artifacts.append(ArtifactDraft(name=fallback_name, language=language, content=content, file_type="code", disk_path=str(disk_path)))
             passed_values.append(passed)
             test_outputs.append(f"{fallback_name}: {output}")
@@ -349,7 +371,11 @@ def create_model_file_artifacts(
         fallback_name, fallback_language = infer_file(prompt)
         content = response.strip()
         disk_path = write_workspace_file(chat_id, fallback_name, content)
-        passed, output = test_generated_file(disk_path, fallback_language)
+        if run_tests and should_test_generated_file(fallback_language) and tested_files < max_test_files:
+            passed, output = test_generated_file(disk_path, fallback_language)
+            tested_files += 1
+        else:
+            passed, output = True, "Test skipped by model registry policy."
         artifacts.append(ArtifactDraft(name=fallback_name, language=fallback_language, content=content, file_type="code", disk_path=str(disk_path)))
         passed_values.append(passed)
         test_outputs.append(f"{fallback_name}: {output}")
@@ -528,10 +554,10 @@ def normalize_history(history: list[dict[str, str]] | None) -> list[dict[str, st
     if not history:
         return []
     normalized: list[dict[str, str]] = []
-    for item in history[-settings.TTD_CHAT_CONTEXT_MESSAGES :]:
+    for item in history:
         role = item.get("role", "")
         content = (item.get("content") or "").strip()
-        if role not in {"user", "assistant"} or not content:
+        if role not in {"system", "user", "assistant"} or not content:
             continue
         normalized.append({"role": role, "content": content[:4000]})
     return normalized
@@ -544,7 +570,9 @@ def _llamacpp_payload(
     system_prompt: str = "",
     history: list[dict[str, str]] | None = None,
     extra_guard: str = "",
+    options: dict[str, Any] | None = None,
 ) -> dict:
+    options = options or {}
     system = llama_cpp_system_prompt(mode, system_prompt, prompt)
     if extra_guard:
         system += f"\n{extra_guard}"
@@ -556,11 +584,14 @@ def _llamacpp_payload(
             {"role": "user", "content": prompt.strip()},
         ],
         "stream": True,
-        "temperature": 0.12 if mode == "expert" else 0.18,
+        "temperature": options.get("temperature", 0.12 if mode == "expert" else 0.18),
         "top_p": 0.88,
     }
-    if settings.TTD_LLAMA_CPP_N_PREDICT > 0:
-        payload["max_tokens"] = settings.TTD_LLAMA_CPP_N_PREDICT
+    max_tokens = int(options.get("max_tokens") or settings.TTD_LLAMA_CPP_N_PREDICT or 0)
+    if max_tokens > 0:
+        payload["max_tokens"] = max_tokens
+    if options.get("prompt_cache_enabled", True):
+        payload["cache_prompt"] = True
     return payload
 
 
@@ -634,8 +665,9 @@ def stream_llamacpp(
     system_prompt: str = "",
     history: list[dict[str, str]] | None = None,
     stop_checker: Callable[[], None] | None = None,
+    options: dict[str, Any] | None = None,
 ) -> Iterable[str]:
-    payload = _llamacpp_payload(prompt, mode, model_name, system_prompt, history)
+    payload = _llamacpp_payload(prompt, mode, model_name, system_prompt, history, options=options)
     token_iter = _iter_llamacpp_tokens(payload, stop_checker=stop_checker)
     initial_tokens: list[str] = []
     initial_text = ""
@@ -654,6 +686,7 @@ def stream_llamacpp(
             system_prompt,
             history,
             "Previous answer drifted into the wrong language. Retry once and answer in clean Russian only.",
+            options=options,
         )
         token_iter = _iter_llamacpp_tokens(retry_payload, stop_checker=stop_checker)
         initial_tokens = []

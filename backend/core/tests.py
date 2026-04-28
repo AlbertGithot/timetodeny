@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -243,6 +244,70 @@ class ApiSmokeTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["runtime"]["running"])
         restart.assert_called_once()
+
+    def test_model_settings_are_saved_from_registry(self) -> None:
+        model_path = Path(tempfile.mkdtemp()) / "speed.gguf"
+        self.addCleanup(lambda: model_path.parent.exists() and shutil.rmtree(model_path.parent, ignore_errors=True))
+        model_path.write_bytes(b"gguf")
+        model = ModelRegistry.objects.create(
+            name="speed",
+            repo_id="local",
+            filename="speed.gguf",
+            status="ready",
+            selected=True,
+            local_path=str(model_path),
+        )
+        login = self.client.post(
+            "/api/admin/login",
+            data=json.dumps({"password": "1111"}),
+            content_type="application/json",
+        )
+        token = login.json()["token"]
+
+        with patch("core.views.stop_managed_llama") as stop_llama:
+            response = self.client.post(
+                f"/api/models/{model.id}/settings",
+                data=json.dumps({
+                    "performance": {
+                        "autoSelect": True,
+                        "useForInstant": True,
+                        "useForExpert": False,
+                        "instantContextMessages": 3,
+                        "expertContextMessages": 18,
+                        "instantMaxTokens": 256,
+                        "expertMaxTokens": 4096,
+                        "llamaContextSize": 4096,
+                        "llamaThreads": 4,
+                        "llamaGpuLayers": 12,
+                        "promptCacheEnabled": True,
+                        "runTests": False,
+                        "maxTestFiles": 0,
+                    }
+                }),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=f"Bearer {token}",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        model.refresh_from_db()
+        self.assertEqual(model.instant_context_messages, 3)
+        self.assertEqual(model.expert_max_tokens, 4096)
+        self.assertEqual(model.llama_threads, 4)
+        self.assertFalse(model.run_tests)
+        self.assertFalse(model.use_for_expert)
+        self.assertEqual(response.json()["model"]["performance"]["instantMaxTokens"], 256)
+        stop_llama.assert_called_once()
+
+    def test_auto_model_selection_prefers_code_model_for_file_tasks(self) -> None:
+        from core.views import choose_response_model
+
+        text = ModelRegistry.objects.create(name="chatty", status="ready", model_type="text", selected=True, quantization="Q4_K_M")
+        coder = ModelRegistry.objects.create(name="coder", status="ready", model_type="code", selected=False, quantization="Q4_K_M")
+
+        chosen = choose_response_model("__auto__", "instant", "создай файл app.py с кодом")
+
+        self.assertEqual(chosen, coder)
+        self.assertTrue(text.selected)
 
     def test_root_serves_exported_frontend(self) -> None:
         response = self.client.get("/")

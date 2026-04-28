@@ -97,6 +97,21 @@ def model_to_dict(model: ModelRegistry) -> dict:
         "quantization": model.quantization,
         "downloadProgress": model.download_progress,
         "localPath": model.local_path,
+        "performance": {
+            "autoSelect": model.auto_select,
+            "useForInstant": model.use_for_instant,
+            "useForExpert": model.use_for_expert,
+            "instantContextMessages": model.instant_context_messages,
+            "expertContextMessages": model.expert_context_messages,
+            "instantMaxTokens": model.instant_max_tokens,
+            "expertMaxTokens": model.expert_max_tokens,
+            "llamaContextSize": model.llama_context_size,
+            "llamaThreads": model.llama_threads,
+            "llamaGpuLayers": model.llama_gpu_layers,
+            "promptCacheEnabled": model.prompt_cache_enabled,
+            "runTests": model.run_tests,
+            "maxTestFiles": model.max_test_files,
+        },
     }
 
 

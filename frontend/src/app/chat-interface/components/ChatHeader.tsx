@@ -17,6 +17,9 @@ interface AvailableModel {
   vram: string;
   status: string;
   selected?: boolean;
+  autoSelect?: boolean;
+  useForInstant?: boolean;
+  useForExpert?: boolean;
 }
 
 interface ModelsResponse {
@@ -29,6 +32,11 @@ interface ModelsResponse {
     status: string;
     selected: boolean;
     hidden: boolean;
+    performance?: {
+      autoSelect?: boolean;
+      useForInstant?: boolean;
+      useForExpert?: boolean;
+    };
   }>;
 }
 
@@ -72,12 +80,15 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
             vram: model.vram,
             status: model.status,
             selected: model.selected,
+            autoSelect: model.performance?.autoSelect ?? true,
+            useForInstant: model.performance?.useForInstant ?? true,
+            useForExpert: model.performance?.useForExpert ?? true,
           }));
         if (visible.length > 0) {
           setModels(visible);
           const selected = visible.find(model => model.selected);
           const activeExists = visible.some(model => model.name === activeModel);
-          if (selected && (!activeExists || activeModel === 'deepseek-r1:14b' || activeModel === 'local-assistant')) {
+          if (selected && activeModel !== '__auto__' && (!activeExists || activeModel === 'deepseek-r1:14b' || activeModel === 'local-assistant')) {
             onModelChange(selected.name);
           }
         } else {
@@ -108,6 +119,7 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
     };
   }, [isStreaming]);
 
+  const displayModel = activeModel === '__auto__' ? 'AUTO (registry)' : activeModel;
   const runtimeState = isStreaming ? 'generating' : runtime?.state || 'offline';
   const runtimeLabel = isStreaming ? 'generating' : runtime?.label || 'offline';
   const runtimeClass = runtimeState === 'generating'
@@ -190,7 +202,7 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
           className="flex items-center gap-2 bg-ttd-elevated border border-ttd-border rounded-sm px-3 py-1.5 text-xs hover:border-ttd-border-bright transition-colors"
         >
           <span className={`status-dot ${models.length ? 'status-dot-green' : 'status-dot-dim'} flex-shrink-0`} />
-          <span className="text-ttd-text">{models.length ? activeModel : 'No local model'}</span>
+          <span className="text-ttd-text">{models.length ? displayModel : 'No local model'}</span>
           <ChevronDown size={11} className="text-ttd-muted" />
         </button>
 
@@ -204,6 +216,20 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
                 No ready `.gguf` files found in models/.
               </div>
             )}
+            {models.length > 0 && (
+              <button
+                onClick={() => { onModelChange('__auto__'); setModelDropOpen(false); }}
+                className={`w-full text-left px-3 py-2.5 flex items-center justify-between hover:bg-ttd-elevated transition-colors ${
+                  activeModel === '__auto__' ? 'bg-ttd-elevated' : ''
+                }`}
+              >
+                <div>
+                  <div className="text-xs text-ttd-text">AUTO (registry)</div>
+                  <div className="text-[10px] text-ttd-muted">chooses model by mode and task</div>
+                </div>
+                <span className="text-[9px] text-ttd-cyan border border-ttd-cyan/30 px-1 py-0.5 rounded-sm">FAST</span>
+              </button>
+            )}
             {models.map((m) => (
               <button
                 key={m.id}
@@ -214,7 +240,9 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
               >
                 <div>
                   <div className="text-xs text-ttd-text">{m.name}</div>
-                  <div className="text-[10px] text-ttd-muted">{m.type} · {m.vram}</div>
+                  <div className="text-[10px] text-ttd-muted">
+                    {m.type} · {m.vram} · {m.autoSelect ? 'AUTO' : 'MANUAL'}
+                  </div>
                 </div>
                 <div className="flex items-center gap-1.5">
                   <span className={`status-dot ${m.status === 'ready' ? 'status-dot-green' : 'status-dot-dim'}`} />

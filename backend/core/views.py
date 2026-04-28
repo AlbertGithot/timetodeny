@@ -44,6 +44,7 @@ from .services import (
     stream_llamacpp,
     system_snapshot,
     test_generated_file,
+    wants_file,
     wants_image,
 )
 from .utils import client_ip, json_response, log_admin_action, make_token, parse_json, require_admin, sse, user_agent
@@ -420,6 +421,152 @@ def chat_context(chat: Chat, current_message_id: UUID) -> list[dict[str, str]]:
     return [{"role": msg.role, "content": msg.content} for msg in reversed(list(messages))]
 
 
+def _clamp_int(value, default: int, low: int, high: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(low, min(high, parsed))
+
+
+def model_context_limit(model: ModelRegistry | None, mode: str) -> int:
+    if not model:
+        return max(0, settings.TTD_CHAT_CONTEXT_MESSAGES)
+    if mode == "expert":
+        return int(model.expert_context_messages)
+    return int(model.instant_context_messages)
+
+
+def model_generation_options(model: ModelRegistry | None, mode: str) -> dict:
+    max_tokens = 0
+    if model:
+        max_tokens = model.expert_max_tokens if mode == "expert" else model.instant_max_tokens
+    elif settings.TTD_LLAMA_CPP_N_PREDICT > 0:
+        max_tokens = settings.TTD_LLAMA_CPP_N_PREDICT
+    return {
+        "max_tokens": max_tokens,
+        "temperature": 0.12 if mode == "expert" else 0.18,
+        "prompt_cache_enabled": model.prompt_cache_enabled if model else True,
+        "run_tests": model.run_tests if model else True,
+        "max_test_files": max(0, int(model.max_test_files)) if model else 2,
+    }
+
+
+def summarize_old_context(messages: list[Message], max_chars: int) -> str:
+    if not messages:
+        return ""
+    items = []
+    for msg in messages[-8:]:
+        content = " ".join(msg.content.split())
+        if not content:
+            continue
+        role = "user" if msg.role == "user" else "assistant"
+        items.append(f"{role}: {content[:260]}")
+    summary = "Earlier conversation summary:\n" + "\n".join(items)
+    return summary[:max_chars]
+
+
+def smart_chat_context(chat: Chat, current_message_id: UUID, model: ModelRegistry | None, mode: str) -> list[dict[str, str]]:
+    limit = model_context_limit(model, mode)
+    if limit <= 0:
+        return []
+
+    rows = list(
+        chat.messages.exclude(id=current_message_id)
+        .exclude(content="")
+        .filter(role__in=["user", "assistant"])
+        .order_by("created_at")
+    )
+    if not rows:
+        return []
+
+    recent = rows[-limit:]
+    older = rows[:-limit]
+    context: list[dict[str, str]] = []
+    char_budget = max(1800, limit * (1800 if mode == "expert" else 900))
+    used = 0
+
+    summary = summarize_old_context(older, 1400 if mode == "expert" else 700)
+    if summary:
+        context.append({"role": "system", "content": summary})
+        used += len(summary)
+
+    remaining_messages: list[dict[str, str]] = []
+    for msg in reversed(recent):
+        content = msg.content.strip()
+        if not content:
+            continue
+        per_message_limit = 5000 if mode == "expert" else 1800
+        clipped = content[:per_message_limit]
+        if used + len(clipped) > char_budget and remaining_messages:
+            break
+        used += len(clipped)
+        remaining_messages.append({"role": msg.role, "content": clipped})
+
+    context.extend(reversed(remaining_messages))
+    return context
+
+
+def model_supports_mode(model: ModelRegistry, mode: str) -> bool:
+    if mode == "expert":
+        return model.use_for_expert
+    return model.use_for_instant
+
+
+def choose_response_model(requested_name: str, mode: str, prompt: str) -> ModelRegistry | None:
+    candidates = list(
+        ModelRegistry.objects.filter(status="ready", hidden=False, model_type__in=["text", "code"])
+    )
+    if not candidates:
+        candidates = list(ModelRegistry.objects.filter(status="ready", model_type__in=["text", "code"]))
+    requested = (requested_name or "").strip()
+    if requested and requested.lower() not in {"__auto__", "auto", "registry-auto"}:
+        for model in candidates:
+            if model.name == requested:
+                return model
+
+    auto_candidates = [model for model in candidates if model.auto_select and model_supports_mode(model, mode)]
+    if not auto_candidates:
+        auto_candidates = [model for model in candidates if model_supports_mode(model, mode)] or candidates
+    if not auto_candidates:
+        return None
+
+    code_task = wants_file(prompt) or any(marker in prompt.lower() for marker in ["код", "code", "python", "typescript", "react", "django"])
+
+    def score(model: ModelRegistry) -> tuple[int, str]:
+        value = 0
+        if model.selected:
+            value += 50
+        if code_task and model.model_type == "code":
+            value += 80
+        if not code_task and model.model_type == "text":
+            value += 20
+        if mode == "instant" and model.quantization.upper() in {"Q2_K", "Q3_K_M", "Q4_K_S", "Q4_K_M"}:
+            value += 10
+        if mode == "expert" and model.quantization.upper() in {"Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"}:
+            value += 8
+        return value, model.name
+
+    return sorted(auto_candidates, key=score, reverse=True)[0]
+
+
+def update_model_performance(model: ModelRegistry, data: dict) -> None:
+    performance = data.get("performance") if isinstance(data.get("performance"), dict) else data
+    model.auto_select = bool_from_payload(performance.get("autoSelect"), model.auto_select)
+    model.use_for_instant = bool_from_payload(performance.get("useForInstant"), model.use_for_instant)
+    model.use_for_expert = bool_from_payload(performance.get("useForExpert"), model.use_for_expert)
+    model.prompt_cache_enabled = bool_from_payload(performance.get("promptCacheEnabled"), model.prompt_cache_enabled)
+    model.run_tests = bool_from_payload(performance.get("runTests"), model.run_tests)
+    model.instant_context_messages = _clamp_int(performance.get("instantContextMessages"), model.instant_context_messages, 0, 32)
+    model.expert_context_messages = _clamp_int(performance.get("expertContextMessages"), model.expert_context_messages, 0, 64)
+    model.instant_max_tokens = _clamp_int(performance.get("instantMaxTokens"), model.instant_max_tokens, 0, 8192)
+    model.expert_max_tokens = _clamp_int(performance.get("expertMaxTokens"), model.expert_max_tokens, 0, 16384)
+    model.llama_context_size = _clamp_int(performance.get("llamaContextSize"), model.llama_context_size, 0, 131072)
+    model.llama_threads = _clamp_int(performance.get("llamaThreads"), model.llama_threads, 0, 256)
+    model.llama_gpu_layers = _clamp_int(performance.get("llamaGpuLayers"), model.llama_gpu_layers, -1, 999)
+    model.max_test_files = _clamp_int(performance.get("maxTestFiles"), model.max_test_files, 0, 32)
+
+
 def generation_metadata(status: str, phase: str, activity: str, progress: int) -> dict:
     return {
         "status": status,
@@ -493,6 +640,7 @@ def run_chat_generation_job(
     selected_model_id: UUID | None,
     system_prompt: str,
     history: list[dict[str, str]],
+    generation_options: dict,
     public_image_base: str,
     attachment_count: int,
     started: float,
@@ -520,7 +668,7 @@ def run_chat_generation_job(
             if use_llamacpp:
                 set_generation_state(assistant, "streaming", "loading", "Поднимаю llama.cpp и выбранную модель...", 10)
                 ensure_llama_server(selected)
-                set_generation_state(assistant, "streaming", "plan", "Планирую структуру ответа...", 15)
+                set_generation_state(assistant, "streaming", "plan", "Подбираю контекст и быстрые параметры ответа...", 15)
                 for token in stream_llamacpp(
                     prompt,
                     mode,
@@ -528,6 +676,7 @@ def run_chat_generation_job(
                     system_prompt,
                     history=history,
                     stop_checker=raise_if_generation_stopped,
+                    options=generation_options,
                 ):
                     content += token
                     token_count += max(1, len(token.split()))
@@ -538,7 +687,14 @@ def run_chat_generation_job(
                         last_save = now
 
                 set_generation_state(assistant, "streaming", "files", "Проверяю, создала ли модель файл(-ы)...", 90)
-                artifacts, passed, output, cleaned = create_model_file_artifacts(prompt, content, str(chat.id), allow_fallback=False)
+                artifacts, passed, output, cleaned = create_model_file_artifacts(
+                    prompt,
+                    content,
+                    str(chat.id),
+                    allow_fallback=False,
+                    run_tests=bool(generation_options.get("run_tests", True)),
+                    max_test_files=int(generation_options.get("max_test_files", 2)),
+                )
                 if artifacts:
                     set_generation_state(assistant, "streaming", "tests", "Сохраняю и проверяю файл(-ы)...", 94)
                     assistant.test_passed = passed
@@ -706,16 +862,16 @@ def chat_stream(request: HttpRequest):
     if settings.TTD_MAX_PROMPT_CHARS > 0 and len(prompt) > settings.TTD_MAX_PROMPT_CHARS:
         return json_response({"ok": False, "error": f"prompt is too long (max {settings.TTD_MAX_PROMPT_CHARS} chars)"}, status=413)
     mode = data.get("mode") or "instant"
-    model_name = data.get("model") or selected_model_name()
+    requested_model_name = data.get("model") or "__auto__"
     attachments, attachment_error = normalize_chat_attachments(data.get("attachments") or [])
     if attachment_error:
         return json_response({"ok": False, "error": attachment_error}, status=413)
     sync_model_registry_with_files()
-    selected_model = ModelRegistry.objects.filter(name=model_name, status="ready").first()
-    if not selected_model:
-        selected_model = ModelRegistry.objects.filter(selected=True, status="ready").first()
+    selected_model = choose_response_model(str(requested_model_name), mode, prompt)
     if selected_model:
         model_name = selected_model.name
+    else:
+        model_name = selected_model_name()
     started = time.monotonic()
 
     chat = get_or_create_chat(data.get("chatId"), prompt, mode, model_name)
@@ -747,7 +903,8 @@ def chat_stream(request: HttpRequest):
 
     selected = selected_model or ModelRegistry.objects.filter(name=model_name).first()
     system_prompt = selected.system_prompt if selected else ""
-    history = chat_context(chat, user_msg.id)
+    history = smart_chat_context(chat, user_msg.id, selected, mode)
+    generation_options = model_generation_options(selected, mode)
     assistant.metadata = {
         "generation": generation_metadata(
             "streaming",
@@ -769,6 +926,7 @@ def chat_stream(request: HttpRequest):
         "selected_model_id": selected.id if selected else None,
         "system_prompt": system_prompt,
         "history": history,
+        "generation_options": generation_options,
         "public_image_base": public_image_base,
         "attachment_count": len(attachments),
         "started": started,
@@ -1005,6 +1163,10 @@ def model_action(request: HttpRequest, model_id: UUID, action: str):
         return json_response({"ok": True})
     elif action == "prompt":
         model.system_prompt = data.get("prompt") or ""
+    elif action == "settings":
+        update_model_performance(model, data)
+        if model.selected:
+            stop_managed_llama()
     elif action == "reload":
         if not model.repo_id or not model.filename:
             return json_response({"ok": False, "error": "Model has no HuggingFace repo/filename to reload"}, status=400)

@@ -21,6 +21,23 @@ interface ModelEntry {
   quantization: string;
   downloadProgress?: number;
   localPath?: string;
+  performance: PerformanceSettings;
+}
+
+interface PerformanceSettings {
+  autoSelect: boolean;
+  useForInstant: boolean;
+  useForExpert: boolean;
+  instantContextMessages: number;
+  expertContextMessages: number;
+  instantMaxTokens: number;
+  expertMaxTokens: number;
+  llamaContextSize: number;
+  llamaThreads: number;
+  llamaGpuLayers: number;
+  promptCacheEnabled: boolean;
+  runTests: boolean;
+  maxTestFiles: number;
 }
 
 interface InstallForm {
@@ -110,6 +127,28 @@ function inferQuantization(filename: string): string {
   return markers.find(marker => upper.includes(marker)) || 'Q4_K_M';
 }
 
+function defaultPerformance(): PerformanceSettings {
+  return {
+    autoSelect: true,
+    useForInstant: true,
+    useForExpert: true,
+    instantContextMessages: 4,
+    expertContextMessages: 12,
+    instantMaxTokens: 512,
+    expertMaxTokens: 2048,
+    llamaContextSize: 0,
+    llamaThreads: 0,
+    llamaGpuLayers: -1,
+    promptCacheEnabled: true,
+    runTests: true,
+    maxTestFiles: 2,
+  };
+}
+
+function normalizePerformance(settings?: Partial<PerformanceSettings>): PerformanceSettings {
+  return { ...defaultPerformance(), ...(settings || {}) };
+}
+
 export default function AdminModelsTab() {
   const [models, setModels] = useState<ModelEntry[]>([]);
   const [registrySearch, setRegistrySearch] = useState('');
@@ -125,6 +164,8 @@ export default function AdminModelsTab() {
   const [installProgress, setInstallProgress] = useState(0);
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [runtimeBusy, setRuntimeBusy] = useState(false);
+  const [settingsDraft, setSettingsDraft] = useState<PerformanceSettings>(defaultPerformance());
+  const [settingsBusy, setSettingsBusy] = useState(false);
 
   const { register, handleSubmit, reset, setValue, formState: { errors } } = useForm<InstallForm>({
     defaultValues: {
@@ -322,6 +363,31 @@ export default function AdminModelsTab() {
   const selectedModel = models.find(m => m.selected);
   const detailModel = visibleModels.find(m => m.id === detailModelId) || selectedModel || visibleModels[0] || null;
   const compatOk = selectedModel?.type !== 'vision';
+
+  useEffect(() => {
+    if (detailModel) {
+      setSettingsDraft(normalizePerformance(detailModel.performance));
+    }
+  }, [detailModel?.id]);
+
+  const updateSettingsDraft = <K extends keyof PerformanceSettings>(key: K, value: PerformanceSettings[K]) => {
+    setSettingsDraft(prev => ({ ...prev, [key]: value }));
+  };
+
+  const handleSaveSettings = async () => {
+    if (!detailModel) return;
+    setSettingsBusy(true);
+    try {
+      const payload = await postJson<ModelResponse>(`/models/${detailModel.id}/settings`, { performance: settingsDraft }, true);
+      setModels(prev => prev.map(m => m.id === detailModel.id ? payload.model : m));
+      loadRuntime();
+      toast.success('Model routing and speed settings saved');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Settings update failed');
+    } finally {
+      setSettingsBusy(false);
+    }
+  };
 
   return (
     <div className="p-6 max-w-screen-2xl mx-auto space-y-6">
@@ -812,6 +878,139 @@ export default function AdminModelsTab() {
                       {detailModel.systemPrompt || <span className="text-ttd-dim italic">No system prompt - click to set</span>}
                     </button>
                   )}
+                </div>
+              )}
+
+              {detailModel.type !== 'vision' && (
+                <div className="border border-ttd-border rounded-sm bg-ttd-elevated/35 p-3 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <div className="text-[10px] text-ttd-muted tracking-wider uppercase">Routing & Speed</div>
+                      <div className="text-[10px] text-ttd-dim">Used by AUTO model selection and llama.cpp startup.</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleSaveSettings()}
+                      disabled={settingsBusy}
+                      className="ttd-btn ttd-btn-cyan text-[10px] px-3 py-1 disabled:opacity-50"
+                    >
+                      {settingsBusy ? 'SAVING' : 'SAVE'}
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-[10px]">
+                    {[
+                      ['autoSelect', 'AUTO SELECT'],
+                      ['useForInstant', 'INSTANT'],
+                      ['useForExpert', 'EXPERT'],
+                      ['promptCacheEnabled', 'PROMPT CACHE'],
+                      ['runTests', 'TEST FILES'],
+                    ].map(([key, label]) => (
+                      <label key={key} className="flex items-center gap-2 bg-ttd-bg/70 border border-ttd-border rounded-sm px-2 py-1.5">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(settingsDraft[key as keyof PerformanceSettings])}
+                          onChange={(e) => updateSettingsDraft(key as keyof PerformanceSettings, e.target.checked as never)}
+                          className="accent-ttd-green"
+                        />
+                        <span className="text-ttd-muted">{label}</span>
+                      </label>
+                    ))}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="space-y-1">
+                      <span className="block text-[10px] text-ttd-dim uppercase">Instant history</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={32}
+                        value={settingsDraft.instantContextMessages}
+                        onChange={(e) => updateSettingsDraft('instantContextMessages', Number(e.target.value))}
+                        className="ttd-input text-xs py-1"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="block text-[10px] text-ttd-dim uppercase">Expert history</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={64}
+                        value={settingsDraft.expertContextMessages}
+                        onChange={(e) => updateSettingsDraft('expertContextMessages', Number(e.target.value))}
+                        className="ttd-input text-xs py-1"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="block text-[10px] text-ttd-dim uppercase">Instant tokens</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={8192}
+                        value={settingsDraft.instantMaxTokens}
+                        onChange={(e) => updateSettingsDraft('instantMaxTokens', Number(e.target.value))}
+                        className="ttd-input text-xs py-1"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="block text-[10px] text-ttd-dim uppercase">Expert tokens</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={16384}
+                        value={settingsDraft.expertMaxTokens}
+                        onChange={(e) => updateSettingsDraft('expertMaxTokens', Number(e.target.value))}
+                        className="ttd-input text-xs py-1"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="block text-[10px] text-ttd-dim uppercase">llama ctx</span>
+                      <input
+                        type="number"
+                        min={0}
+                        value={settingsDraft.llamaContextSize}
+                        onChange={(e) => updateSettingsDraft('llamaContextSize', Number(e.target.value))}
+                        className="ttd-input text-xs py-1"
+                        placeholder="0 = env"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="block text-[10px] text-ttd-dim uppercase">threads</span>
+                      <input
+                        type="number"
+                        min={0}
+                        value={settingsDraft.llamaThreads}
+                        onChange={(e) => updateSettingsDraft('llamaThreads', Number(e.target.value))}
+                        className="ttd-input text-xs py-1"
+                        placeholder="0 = auto"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="block text-[10px] text-ttd-dim uppercase">GPU layers</span>
+                      <input
+                        type="number"
+                        min={-1}
+                        value={settingsDraft.llamaGpuLayers}
+                        onChange={(e) => updateSettingsDraft('llamaGpuLayers', Number(e.target.value))}
+                        className="ttd-input text-xs py-1"
+                        placeholder="-1 = env/default"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="block text-[10px] text-ttd-dim uppercase">max tests</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={32}
+                        value={settingsDraft.maxTestFiles}
+                        onChange={(e) => updateSettingsDraft('maxTestFiles', Number(e.target.value))}
+                        className="ttd-input text-xs py-1"
+                      />
+                    </label>
+                  </div>
+                  <div className="text-[10px] text-ttd-dim">
+                    `0` tokens means llama.cpp default. Changing llama ctx/threads/GPU on active model restarts llama-server.
+                  </div>
                 </div>
               )}
 
