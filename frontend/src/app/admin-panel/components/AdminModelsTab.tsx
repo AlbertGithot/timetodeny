@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { toast } from 'sonner';
 import { Download, Trash2, Eye, EyeOff, Terminal, CheckCircle, AlertTriangle, Search, RefreshCw, Play, Square, Activity } from 'lucide-react';
@@ -63,12 +63,45 @@ interface SearchResult {
   ggufFiles: string[];
 }
 
+type InstallJobStatus = 'queued' | 'downloading' | 'verifying' | 'ready' | 'failed' | 'cancelled';
+
+interface InstallJob {
+  id: string;
+  repoId: string;
+  filename: string;
+  type: 'text' | 'vision' | 'code';
+  quantization: string;
+  status: InstallJobStatus;
+  progress: number;
+  bytesDownloaded: number;
+  bytesTotal: number;
+  downloadedLabel: string;
+  totalLabel: string;
+  speedLabel: string;
+  etaLabel: string;
+  log: string;
+  errorDetails?: string | null;
+  localPath: string;
+  model?: ModelEntry | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 const STATUS_CONFIG = {
   ready: { label: 'READY', cls: 'text-ttd-green border-ttd-green/30 bg-ttd-green/5' },
   loading: { label: 'LOADING', cls: 'text-ttd-cyan border-ttd-cyan/30 bg-ttd-cyan/5' },
   downloading: { label: 'DOWNLOADING', cls: 'text-ttd-amber border-ttd-amber/30 bg-ttd-amber/5' },
   error: { label: 'ERROR', cls: 'text-ttd-red border-ttd-red/30 bg-ttd-red/5' },
   unloaded: { label: 'UNLOADED', cls: 'text-ttd-muted border-ttd-border' },
+};
+
+const INSTALL_STATUS_CONFIG: Record<InstallJobStatus, { label: string; cls: string; bar: string }> = {
+  queued: { label: 'QUEUED', cls: 'text-ttd-muted border-ttd-border bg-ttd-elevated', bar: 'progress-bar-fill-cyan' },
+  downloading: { label: 'DOWNLOADING', cls: 'text-ttd-amber border-ttd-amber/30 bg-ttd-amber/5', bar: 'progress-bar-fill-amber' },
+  verifying: { label: 'VERIFYING', cls: 'text-ttd-cyan border-ttd-cyan/30 bg-ttd-cyan/5', bar: 'progress-bar-fill-cyan' },
+  ready: { label: 'READY', cls: 'text-ttd-green border-ttd-green/30 bg-ttd-green/5', bar: 'progress-bar-fill-green' },
+  failed: { label: 'FAILED', cls: 'text-ttd-red border-ttd-red/30 bg-ttd-red/5', bar: 'progress-bar-fill-red' },
+  cancelled: { label: 'CANCELLED', cls: 'text-ttd-muted border-ttd-border bg-ttd-elevated', bar: 'progress-bar-fill-red' },
 };
 
 const TYPE_CONFIG = {
@@ -96,6 +129,16 @@ interface ModelResponse {
 interface SearchResponse {
   ok: boolean;
   results: SearchResult[];
+}
+
+interface InstallJobsResponse {
+  ok: boolean;
+  jobs: InstallJob[];
+}
+
+interface InstallJobResponse {
+  ok: boolean;
+  job: InstallJob;
 }
 
 interface RuntimeInfo {
@@ -160,12 +203,13 @@ export default function AdminModelsTab() {
   const [editingPrompt, setEditingPrompt] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [detailModelId, setDetailModelId] = useState<string | null>(null);
-  const [installing, setInstalling] = useState(false);
-  const [installProgress, setInstallProgress] = useState(0);
+  const [submittingInstall, setSubmittingInstall] = useState(false);
+  const [installJobs, setInstallJobs] = useState<InstallJob[]>([]);
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [runtimeBusy, setRuntimeBusy] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState<PerformanceSettings>(defaultPerformance());
   const [settingsBusy, setSettingsBusy] = useState(false);
+  const seenReadyJobsRef = useRef<Set<string>>(new Set());
 
   const { register, handleSubmit, reset, setValue, formState: { errors } } = useForm<InstallForm>({
     defaultValues: {
@@ -187,10 +231,33 @@ export default function AdminModelsTab() {
       .catch(() => undefined);
   };
 
+  const loadInstallJobs = () => {
+    getJson<InstallJobsResponse>('/models/install-jobs', true)
+      .then((payload) => {
+        setInstallJobs(payload.jobs);
+        const newReadyJobs = payload.jobs.filter(job => job.status === 'ready' && !seenReadyJobsRef.current.has(job.id));
+        if (newReadyJobs.length > 0) {
+          newReadyJobs.forEach(job => seenReadyJobsRef.current.add(job.id));
+          loadModels();
+          loadRuntime();
+        }
+      })
+      .catch(() => undefined);
+  };
+
   useEffect(() => {
     loadModels();
     loadRuntime();
+    loadInstallJobs();
   }, []);
+
+  const hasActiveInstallJob = installJobs.some(job => ['queued', 'downloading', 'verifying'].includes(job.status));
+
+  useEffect(() => {
+    if (!hasActiveInstallJob) return;
+    const timer = window.setInterval(loadInstallJobs, 1500);
+    return () => window.clearInterval(timer);
+  }, [hasActiveInstallJob]);
 
   const filtered = models.filter(m =>
     m.name.toLowerCase().includes(registrySearch.toLowerCase()) ||
@@ -282,27 +349,42 @@ export default function AdminModelsTab() {
   };
 
   const onInstall = async (data: InstallForm) => {
-    setInstalling(true);
-    setInstallProgress(8);
-    const progressTimer = window.setInterval(() => {
-      setInstallProgress(prev => Math.min(prev + 7, 92));
-    }, 1500);
+    setSubmittingInstall(true);
     try {
-      const payload = await postJson<ModelResponse>('/models/install', { ...data, download: true }, true);
-      setInstallProgress(100);
-      setModels(prev => {
-        const exists = prev.some(model => model.id === payload.model.id);
-        return exists ? prev.map(model => model.id === payload.model.id ? payload.model : model) : [...prev, payload.model];
-      });
-      loadRuntime();
+      const payload = await postJson<InstallJobResponse>('/models/install-jobs', data, true);
+      setInstallJobs(prev => [payload.job, ...prev.filter(job => job.id !== payload.job.id)]);
       reset();
-      toast.success(`Model installed: ${data.filename}`);
+      if (payload.job.status === 'ready') {
+        loadModels();
+        loadRuntime();
+        toast.success(`Model installed: ${data.filename}`);
+      } else {
+        toast.success(`Install queued: ${data.filename}`);
+      }
     } catch (error) {
-      loadModels();
       toast.error(error instanceof Error ? error.message : 'Install failed');
     } finally {
-      window.clearInterval(progressTimer);
-      setInstalling(false);
+      setSubmittingInstall(false);
+    }
+  };
+
+  const handleCancelInstall = async (id: string) => {
+    try {
+      const payload = await postJson<InstallJobResponse>(`/models/install-jobs/${id}/cancel`, {}, true);
+      setInstallJobs(prev => prev.map(job => job.id === id ? payload.job : job));
+      toast('Install cancellation requested');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Cancel failed');
+    }
+  };
+
+  const handleRetryInstall = async (id: string) => {
+    try {
+      const payload = await postJson<InstallJobResponse>(`/models/install-jobs/${id}/retry`, {}, true);
+      setInstallJobs(prev => [payload.job, ...prev]);
+      toast.success(`Retry queued: ${payload.job.filename}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Retry failed');
     }
   };
 
@@ -661,27 +743,138 @@ export default function AdminModelsTab() {
             </div>
           </div>
 
-          {installing && (
-            <div className="mb-4">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[10px] text-ttd-amber">Downloading from HuggingFace...</span>
-                <span className="text-[10px] text-ttd-amber font-mono">{installProgress}%</span>
-              </div>
-              <div className="progress-bar-track">
-                <div className="progress-bar-fill-amber" style={{ width: `${installProgress}%` }} />
-              </div>
-            </div>
-          )}
-
           <button
             type="submit"
-            disabled={installing}
+            disabled={submittingInstall}
             className="ttd-btn ttd-btn-cyan text-xs px-6 py-2 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Download size={12} />
-            {installing ? 'INSTALLING...' : 'INSTALL MODEL'}
+            {submittingInstall ? 'QUEUEING...' : 'INSTALL MODEL'}
           </button>
         </form>
+      </div>
+
+      {/* Install jobs */}
+      <div className="bg-ttd-surface border border-ttd-border rounded-sm overflow-hidden">
+        <div className="px-4 py-3 border-b border-ttd-border flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Download size={13} className="text-ttd-amber" />
+            <span className="text-xs font-bold tracking-wider text-ttd-text">MODEL INSTALL JOBS</span>
+            <span className="text-[10px] text-ttd-muted">{installJobs.length} tracked</span>
+          </div>
+          <button
+            type="button"
+            onClick={loadInstallJobs}
+            className="ttd-btn ttd-btn-ghost text-[10px] px-3 py-1 flex items-center gap-1"
+          >
+            <RefreshCw size={10} />
+            REFRESH
+          </button>
+        </div>
+        {installJobs.length === 0 ? (
+          <div className="p-4 text-xs text-ttd-muted">
+            No installs yet. Pick a GGUF file above and this panel will show real progress, not the old decorative nonsense.
+          </div>
+        ) : (
+          <div className="p-4 grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {installJobs.slice(0, 8).map((job) => {
+              const config = INSTALL_STATUS_CONFIG[job.status];
+              const active = ['queued', 'downloading', 'verifying'].includes(job.status);
+              return (
+                <div key={job.id} className="border border-ttd-border rounded-sm bg-ttd-elevated/35 p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-ttd-text truncate" title={job.filename}>{job.filename}</div>
+                      <div className="text-[11px] text-ttd-dim truncate" title={job.repoId}>{job.repoId}</div>
+                    </div>
+                    <span className={`text-[10px] border px-1.5 py-0.5 rounded-sm ${config.cls}`}>
+                      {config.label}
+                    </span>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[10px] text-ttd-muted">
+                        {job.downloadedLabel} / {job.totalLabel}
+                      </span>
+                      <span className="text-[10px] text-ttd-amber font-mono">{job.progress}%</span>
+                    </div>
+                    <div className="progress-bar-track">
+                      <div className={config.bar} style={{ width: `${Math.max(0, Math.min(100, job.progress))}%` }} />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2 text-[10px]">
+                    <div className="bg-ttd-bg rounded-sm px-2 py-1.5">
+                      <div className="text-ttd-dim mb-0.5">SPEED</div>
+                      <div className="text-ttd-cyan font-mono">{job.speedLabel}</div>
+                    </div>
+                    <div className="bg-ttd-bg rounded-sm px-2 py-1.5">
+                      <div className="text-ttd-dim mb-0.5">ETA</div>
+                      <div className="text-ttd-text font-mono">{job.etaLabel}</div>
+                    </div>
+                    <div className="bg-ttd-bg rounded-sm px-2 py-1.5">
+                      <div className="text-ttd-dim mb-0.5">UPDATED</div>
+                      <div className="text-ttd-muted font-mono">{job.updatedAt}</div>
+                    </div>
+                  </div>
+
+                  {job.localPath && (
+                    <div className="text-[10px] text-ttd-dim truncate" title={job.localPath}>
+                      LOCAL: {job.localPath}
+                    </div>
+                  )}
+
+                  {job.log && (
+                    <pre className="bg-ttd-bg border border-ttd-border rounded-sm p-2 text-[10px] text-ttd-dim whitespace-pre-wrap max-h-28 overflow-auto">
+                      {job.log}
+                    </pre>
+                  )}
+
+                  {job.errorDetails && (
+                    <div className="border border-ttd-red/30 bg-ttd-red/5 rounded-sm px-3 py-2 text-[11px] text-ttd-red">
+                      {job.errorDetails}
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-2">
+                    {active && (
+                      <button
+                        type="button"
+                        onClick={() => void handleCancelInstall(job.id)}
+                        className="ttd-btn ttd-btn-red text-[10px] px-3 py-1 flex items-center gap-1"
+                      >
+                        <Square size={10} />
+                        CANCEL
+                      </button>
+                    )}
+                    {['failed', 'cancelled'].includes(job.status) && (
+                      <button
+                        type="button"
+                        onClick={() => void handleRetryInstall(job.id)}
+                        className="ttd-btn ttd-btn-amber text-[10px] px-3 py-1 flex items-center gap-1"
+                        style={{ borderColor: '#ffaa00', color: '#ffaa00', background: 'rgba(255,170,0,0.1)' }}
+                      >
+                        <RefreshCw size={10} />
+                        RETRY
+                      </button>
+                    )}
+                    {job.status === 'ready' && job.model && (
+                      <button
+                        type="button"
+                        onClick={() => void handleSelect(job.model!.id)}
+                        className="ttd-btn ttd-btn-green text-[10px] px-3 py-1 flex items-center gap-1 ml-auto"
+                      >
+                        <Play size={10} />
+                        SELECT
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Registry controls */}

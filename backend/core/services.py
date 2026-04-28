@@ -392,6 +392,32 @@ def create_model_file_artifacts(
     return artifacts, aggregate_passed, "\n".join(test_outputs), cleaned_response
 
 
+def postprocess_assistant_response(response: str, *, max_tokens: int = 0, token_count: int = 0) -> tuple[str, bool]:
+    text = (response or "").replace("\r\n", "\n")
+    text = text.replace("[DONE]", "").replace("<s>", "").replace("</s>", "").strip()
+
+    lines: list[str] = []
+    for line in text.split("\n"):
+        if lines and lines[-1].strip() == line.strip() and line.strip():
+            continue
+        lines.append(line)
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    needs_continuation = False
+    if text.count("```") % 2 == 1:
+        text = f"{text.rstrip()}\n```"
+        needs_continuation = True
+
+    if max_tokens > 0 and token_count >= max(24, int(max_tokens * 0.92)):
+        needs_continuation = True
+
+    if text.endswith(("...", "…", "```")) and max_tokens > 0 and token_count >= max(24, int(max_tokens * 0.75)):
+        needs_continuation = True
+
+    return text, needs_continuation
+
+
 def create_image_artifact(prompt: str, public_url: str) -> ArtifactDraft:
     image_prompt = prompt.replace("/imagine", "", 1).strip() or "Time To Deny generated image"
     safe_prompt = html.escape(image_prompt[:220])

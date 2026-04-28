@@ -13,9 +13,9 @@ from unittest.mock import patch
 
 from django.test import Client, TestCase, override_settings
 
-from .models import Chat, GeneratedFile, ModelRegistry, RequestLog
+from .models import Chat, GeneratedFile, ModelInstallJob, ModelRegistry, RequestLog
 from .seed import ensure_defaults
-from .services import create_model_file_artifacts, stream_llamacpp
+from .services import create_model_file_artifacts, postprocess_assistant_response, stream_llamacpp
 
 
 class FakeLlamaResponse:
@@ -157,6 +157,76 @@ class ApiSmokeTests(TestCase):
         model = ModelRegistry.objects.get(repo_id="owner/broken-GGUF", filename="broken-q4_k_m.gguf")
         self.assertEqual(model.status, "error")
         self.assertIn("not found", model.local_path)
+
+    def test_model_install_job_downloads_with_real_job_status(self) -> None:
+        model_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(model_dir.cleanup)
+        login = self.client.post(
+            "/api/admin/login",
+            data=json.dumps({"password": "1111"}),
+            content_type="application/json",
+        )
+        token = login.json()["token"]
+
+        def fake_job_download(job: ModelInstallJob) -> tuple[str, str]:
+            target = Path(model_dir.name) / "owner__model-GGUF" / job.filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"gguf")
+            job.bytes_total = 4
+            job.bytes_downloaded = 4
+            job.speed_bps = 4
+            job.progress = 95
+            job.save(update_fields=["bytes_total", "bytes_downloaded", "speed_bps", "progress", "updated_at"])
+            return str(target), "4B"
+
+        with override_settings(TTD_MODEL_DIR=Path(model_dir.name), TTD_ALLOW_HF_DOWNLOAD="1"):
+            with patch("core.views.download_huggingface_model_for_job", side_effect=fake_job_download):
+                response = self.client.post(
+                    "/api/models/install-jobs",
+                    data=json.dumps({
+                        "repoId": "owner/model-GGUF",
+                        "filename": "job-q4_k_m.gguf",
+                        "modelType": "text",
+                        "quantization": "Q4_K_M",
+                    }),
+                    content_type="application/json",
+                    HTTP_AUTHORIZATION=f"Bearer {token}",
+                )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.json()
+        self.assertEqual(payload["job"]["status"], "ready")
+        self.assertEqual(payload["job"]["progress"], 100)
+        self.assertEqual(payload["job"]["model"]["status"], "ready")
+        self.assertTrue(ModelRegistry.objects.filter(filename="job-q4_k_m.gguf", status="ready").exists())
+
+    def test_model_install_job_can_be_cancelled_and_retried(self) -> None:
+        model_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(model_dir.cleanup)
+        login = self.client.post(
+            "/api/admin/login",
+            data=json.dumps({"password": "1111"}),
+            content_type="application/json",
+        )
+        token = login.json()["token"]
+        job = ModelInstallJob.objects.create(repo_id="owner/model-GGUF", filename="retry-q4_k_m.gguf", status="failed")
+
+        def fake_job_download(next_job: ModelInstallJob) -> tuple[str, str]:
+            target = Path(model_dir.name) / next_job.filename
+            target.write_bytes(b"gguf")
+            return str(target), "4B"
+
+        with override_settings(TTD_MODEL_DIR=Path(model_dir.name)):
+            with patch("core.views.download_huggingface_model_for_job", side_effect=fake_job_download):
+                retry = self.client.post(
+                    f"/api/models/install-jobs/{job.id}/retry",
+                    data=json.dumps({}),
+                    content_type="application/json",
+                    HTTP_AUTHORIZATION=f"Bearer {token}",
+                )
+
+        self.assertEqual(retry.status_code, 201)
+        self.assertNotEqual(retry.json()["job"]["id"], str(job.id))
 
     def test_models_collection_syncs_only_existing_local_files(self) -> None:
         model_dir = tempfile.TemporaryDirectory()
@@ -474,6 +544,16 @@ print('hi')
         self.assertIsNone(passed)
         self.assertEqual(output, "")
         self.assertEqual(cleaned, response.strip())
+
+    def test_response_postprocess_marks_truncated_code_for_continue(self) -> None:
+        cleaned, needs_continue = postprocess_assistant_response(
+            "Ответ\n\n```python\nprint('unterminated')",
+            max_tokens=100,
+            token_count=95,
+        )
+
+        self.assertTrue(cleaned.endswith("```"))
+        self.assertTrue(needs_continue)
 
     def test_llamacpp_file_request_creates_generated_file(self) -> None:
         model_dir = tempfile.TemporaryDirectory()

@@ -148,6 +148,42 @@ class ModelRegistry(TimeStampedModel):
         return self.name
 
 
+class ModelInstallJob(TimeStampedModel):
+    TYPE_CHOICES = ModelRegistry.TYPE_CHOICES
+    STATUS_CHOICES = (
+        ("queued", "Queued"),
+        ("downloading", "Downloading"),
+        ("verifying", "Verifying"),
+        ("ready", "Ready"),
+        ("failed", "Failed"),
+        ("cancelled", "Cancelled"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    repo_id = models.CharField(max_length=255)
+    filename = models.CharField(max_length=255)
+    model_type = models.CharField(max_length=20, choices=TYPE_CHOICES, default="text")
+    quantization = models.CharField(max_length=64, default="Q4_K_M")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="queued")
+    progress = models.PositiveSmallIntegerField(default=0)
+    bytes_downloaded = models.BigIntegerField(default=0)
+    bytes_total = models.BigIntegerField(default=0)
+    speed_bps = models.FloatField(default=0)
+    eta_seconds = models.PositiveIntegerField(default=0)
+    log = models.TextField(blank=True)
+    error_details = models.TextField(blank=True)
+    local_path = models.CharField(max_length=500, blank=True)
+    requested_by_ip = models.GenericIPAddressField(null=True, blank=True)
+    requested_by_user_agent = models.TextField(blank=True)
+    model = models.ForeignKey(ModelRegistry, null=True, blank=True, related_name="install_jobs", on_delete=models.SET_NULL)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.repo_id}/{self.filename} [{self.status}]"
+
+
 class AdminSession(TimeStampedModel):
     STATUS_CHOICES = (
         ("active", "Active"),

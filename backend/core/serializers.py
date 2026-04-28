@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from django.db.models import Count
 
-from .models import AdminSession, Chat, GeneratedFile, Message, ModelRegistry, RequestLog
+from .models import AdminSession, Chat, GeneratedFile, Message, ModelInstallJob, ModelRegistry, RequestLog
 from .utils import now_label, time_label
 
 
@@ -24,6 +24,8 @@ def message_to_dict(message: Message) -> dict:
         "ts": time_label(message.created_at),
     }
     generation = message.metadata.get("generation") if isinstance(message.metadata, dict) else None
+    if isinstance(message.metadata, dict) and message.metadata.get("needsContinuation"):
+        payload["needsContinuation"] = True
     if isinstance(generation, dict):
         payload["generation"] = {
             "status": generation.get("status") or "streaming",
@@ -112,6 +114,59 @@ def model_to_dict(model: ModelRegistry) -> dict:
             "runTests": model.run_tests,
             "maxTestFiles": model.max_test_files,
         },
+    }
+
+
+def bytes_label(value: int | float | None) -> str:
+    amount = float(value or 0)
+    if amount <= 0:
+        return "-"
+    gb = amount / (1024**3)
+    if gb >= 1:
+        return f"{gb:.2f}GB"
+    mb = amount / (1024**2)
+    if mb >= 1:
+        return f"{mb:.1f}MB"
+    kb = amount / 1024
+    if kb >= 1:
+        return f"{kb:.1f}KB"
+    return f"{int(amount)}B"
+
+
+def eta_label(seconds: int | float | None) -> str:
+    value = int(seconds or 0)
+    if value <= 0:
+        return "-"
+    minutes, sec = divmod(value, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {sec}s"
+    return f"{sec}s"
+
+
+def install_job_to_dict(job: ModelInstallJob) -> dict:
+    return {
+        "id": str(job.id),
+        "repoId": job.repo_id,
+        "filename": job.filename,
+        "type": job.model_type,
+        "quantization": job.quantization,
+        "status": job.status,
+        "progress": job.progress,
+        "bytesDownloaded": job.bytes_downloaded,
+        "bytesTotal": job.bytes_total,
+        "downloadedLabel": bytes_label(job.bytes_downloaded),
+        "totalLabel": bytes_label(job.bytes_total),
+        "speedLabel": f"{bytes_label(job.speed_bps)}/s" if job.speed_bps > 0 else "-",
+        "etaLabel": eta_label(job.eta_seconds),
+        "log": job.log,
+        "errorDetails": job.error_details or None,
+        "localPath": job.local_path,
+        "model": model_to_dict(job.model) if job.model else None,
+        "createdAt": now_label(job.created_at),
+        "updatedAt": now_label(job.updated_at),
     }
 
 

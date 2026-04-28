@@ -47,6 +47,7 @@ export interface Message {
   generatedFiles?: GeneratedFile[];
   tokensPerSec?: number;
   totalTokens?: number;
+  needsContinuation?: boolean;
   testResult?: { passed: boolean; output: string };
 }
 
@@ -392,6 +393,15 @@ export default function ChatInterfaceClient() {
     toast('Generation stopped');
   }, [chatId]);
 
+  const handleContinue = useCallback((message: Message) => {
+    const prompt = [
+      'Продолжи предыдущий ответ ровно с места остановки.',
+      'Не повторяй уже написанное.',
+      'Если ответ был с кодом или списком, продолжи структуру и закрой ее корректно.',
+    ].join(' ');
+    void handleSend(prompt, []);
+  }, [handleSend]);
+
   const handleModeChange = (newMode: Mode) => {
     setMode(newMode);
     toast.success(`Mode switched to ${newMode.toUpperCase()}`);
@@ -442,6 +452,7 @@ export default function ChatInterfaceClient() {
             messages={messages}
             isStreaming={isStreaming}
             messagesEndRef={messagesEndRef}
+            onContinue={handleContinue}
           />
           <ChatInputBar
             value={inputValue}

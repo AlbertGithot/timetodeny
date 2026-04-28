@@ -8,9 +8,10 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.request
 from io import StringIO
 from pathlib import Path, PurePosixPath
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from uuid import UUID
 
 from django.conf import settings
@@ -24,12 +25,13 @@ from django.views.decorators.csrf import csrf_exempt
 from .chat_runtime import GenerationStopped, generation_slot, queue_status, raise_if_generation_stopped, request_generation_stop
 from .llama_runtime import ensure_llama_server, llama_runtime_status, restart_llama_server, stop_managed_llama
 from .model_registry import delete_local_model_file, file_size_label, sync_model_registry_with_files
-from .models import AdminSession, AdminSetting, Attachment, Chat, GeneratedFile, Message, ModelRegistry, RequestLog
+from .models import AdminSession, AdminSetting, Attachment, Chat, GeneratedFile, Message, ModelInstallJob, ModelRegistry, RequestLog
 from .seed import ensure_defaults
 from .serializers import (
     chat_queryset,
     chat_to_detail,
     chat_to_summary,
+    install_job_to_dict,
     message_to_dict,
     model_to_dict,
     request_to_dict,
@@ -40,6 +42,8 @@ from .services import (
     chunk_text,
     create_model_file_artifacts,
     language_from_filename,
+    postprocess_assistant_response,
+    safe_filename,
     search_huggingface_models,
     stream_llamacpp,
     system_snapshot,
@@ -709,6 +713,11 @@ def run_chat_generation_job(
                             disk_path=file.disk_path,
                         )
                     content = cleaned
+                content, needs_continuation = postprocess_assistant_response(
+                    content,
+                    max_tokens=int(generation_options.get("max_tokens") or 0),
+                    token_count=token_count,
+                )
             else:
                 set_generation_state(assistant, "streaming", "draft", "Готовлю локальный ответ...", 15)
                 draft = build_local_draft(
@@ -742,6 +751,7 @@ def run_chat_generation_job(
                         file_type=file.file_type,
                         disk_path=file.disk_path,
                     )
+                content, needs_continuation = postprocess_assistant_response(content, token_count=token_count)
 
         elapsed = max(0.001, time.monotonic() - started)
         assistant.content = content
@@ -749,6 +759,7 @@ def run_chat_generation_job(
         assistant.tokens_per_sec = token_count / elapsed
         metadata = assistant.metadata if isinstance(assistant.metadata, dict) else {}
         metadata["generation"] = generation_metadata("success", "done", "Все готово.", 100)
+        metadata["needsContinuation"] = needs_continuation
         assistant.metadata = metadata
         assistant.save()
 
@@ -1053,6 +1064,292 @@ def download_huggingface_model(repo_id: str, filename: str) -> tuple[str, str]:
     if not local_path.is_file():
         raise RuntimeError(f"HuggingFace download finished but file was not found: {local_path}")
     return str(local_path), file_size_label(str(local_path))
+
+
+INSTALL_TERMINAL_STATUSES = {"ready", "failed", "cancelled"}
+
+
+def huggingface_resolve_url(repo_id: str, filename: str) -> str:
+    return f"https://huggingface.co/{quote(repo_id.strip(), safe='/')}/resolve/main/{quote(filename.strip(), safe='/')}"
+
+
+def install_target_path(repo_id: str, filename: str) -> Path:
+    validate_gguf_filename(filename)
+    root = Path(settings.TTD_MODEL_DIR).expanduser().resolve()
+    folder = safe_filename(repo_id.replace("/", "__"), "huggingface_model")
+    relative = PurePosixPath(filename)
+    target = (root / folder / Path(*relative.parts)).resolve()
+    if root != target and root not in target.parents:
+        raise ValueError("resolved model path escaped model directory")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def append_install_log(job: ModelInstallJob, line: str) -> None:
+    ts = timezone.localtime().strftime("%H:%M:%S")
+    job.log = f"{job.log}[{ts}] {line}\n"[-8000:]
+
+
+def install_job_cancelled(job_id: UUID) -> bool:
+    return ModelInstallJob.objects.filter(id=job_id, status="cancelled").exists()
+
+
+def update_install_progress(
+    job: ModelInstallJob,
+    *,
+    status: str | None = None,
+    progress: int | None = None,
+    downloaded: int | None = None,
+    total: int | None = None,
+    speed: float | None = None,
+    eta: int | None = None,
+    log_line: str | None = None,
+) -> None:
+    fields: list[str] = []
+    if status is not None:
+        job.status = status
+        fields.append("status")
+    if progress is not None:
+        job.progress = max(0, min(100, int(progress)))
+        fields.append("progress")
+    if downloaded is not None:
+        job.bytes_downloaded = max(0, int(downloaded))
+        fields.append("bytes_downloaded")
+    if total is not None:
+        job.bytes_total = max(0, int(total))
+        fields.append("bytes_total")
+    if speed is not None:
+        job.speed_bps = max(0, float(speed))
+        fields.append("speed_bps")
+    if eta is not None:
+        job.eta_seconds = max(0, int(eta))
+        fields.append("eta_seconds")
+    if log_line:
+        append_install_log(job, log_line)
+        fields.append("log")
+    if fields:
+        fields.append("updated_at")
+        job.save(update_fields=fields)
+
+
+def download_huggingface_model_for_job(job: ModelInstallJob) -> tuple[str, str]:
+    if str(getattr(settings, "TTD_ALLOW_HF_DOWNLOAD", "1")) != "1":
+        raise RuntimeError("HuggingFace downloads are disabled by TTD_ALLOW_HF_DOWNLOAD")
+
+    target = install_target_path(job.repo_id, job.filename)
+    temporary = target.with_name(f"{target.name}.part")
+    url = huggingface_resolve_url(job.repo_id, job.filename)
+    headers = {"User-Agent": "TimeToDeny/1.0"}
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    update_install_progress(job, status="downloading", progress=2, log_line=f"Connecting to {url}")
+    request = urllib.request.Request(url, headers=headers)
+    started = time.monotonic()
+    last_update = 0.0
+    downloaded = 0
+    total = 0
+
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            total = int(response.headers.get("Content-Length") or 0)
+            update_install_progress(job, total=total, log_line=f"Download started: {job.filename}")
+            with open(temporary, "wb") as handle:
+                while True:
+                    if install_job_cancelled(job.id):
+                        raise RuntimeError("Installation cancelled")
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    downloaded += len(chunk)
+                    now = time.monotonic()
+                    if now - last_update < 0.7 and (not total or downloaded < total):
+                        continue
+                    elapsed = max(0.001, now - started)
+                    speed = downloaded / elapsed
+                    if total:
+                        progress = 3 + int((downloaded / total) * 92)
+                        eta = int((total - downloaded) / speed) if speed > 0 else 0
+                    else:
+                        progress = min(95, 5 + int(downloaded / (64 * 1024 * 1024)))
+                        eta = 0
+                    update_install_progress(
+                        job,
+                        progress=progress,
+                        downloaded=downloaded,
+                        total=total,
+                        speed=speed,
+                        eta=eta,
+                    )
+                    last_update = now
+
+        if total and downloaded < total:
+            raise RuntimeError(f"Downloaded {downloaded} of {total} bytes")
+        temporary.replace(target)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+    update_install_progress(job, progress=95, downloaded=downloaded, total=total, log_line="Download finished")
+    return str(target), file_size_label(target)
+
+
+def run_model_install_job(job_id: UUID) -> None:
+    close_old_connections()
+    try:
+        job = ModelInstallJob.objects.get(id=job_id)
+        if job.status == "cancelled":
+            return
+        update_install_progress(job, status="downloading", progress=1, log_line="Install job started")
+        local_path, size = download_huggingface_model_for_job(job)
+
+        job.refresh_from_db()
+        if job.status == "cancelled":
+            append_install_log(job, "Install job cancelled")
+            job.save(update_fields=["log", "updated_at"])
+            return
+
+        update_install_progress(job, status="verifying", progress=96, log_line="Verifying local GGUF file")
+        path = Path(local_path)
+        if not path.is_file():
+            raise RuntimeError(f"Downloaded file is missing: {path}")
+
+        model_name = PurePosixPath(job.filename).name.removesuffix(".gguf")
+        model, _created = ModelRegistry.objects.update_or_create(
+            repo_id=job.repo_id,
+            filename=job.filename,
+            defaults={
+                "name": model_name,
+                "model_type": job.model_type,
+                "quantization": job.quantization,
+                "status": "ready",
+                "size": size,
+                "vram": "-",
+                "download_progress": 100,
+                "local_path": local_path,
+            },
+        )
+        job.model = model
+        job.status = "ready"
+        job.progress = 100
+        job.local_path = local_path
+        job.error_details = ""
+        append_install_log(job, f"Ready: {model.name}")
+        job.save(update_fields=["model", "status", "progress", "local_path", "error_details", "log", "updated_at"])
+        sync_model_registry_with_files()
+    except Exception as exc:
+        try:
+            job = ModelInstallJob.objects.get(id=job_id)
+        except ModelInstallJob.DoesNotExist:
+            return
+        if job.status == "cancelled":
+            append_install_log(job, "Install job cancelled")
+            job.save(update_fields=["log", "updated_at"])
+            return
+        job.status = "failed"
+        job.error_details = str(exc)
+        append_install_log(job, f"Failed: {exc}")
+        job.save(update_fields=["status", "error_details", "log", "updated_at"])
+    finally:
+        close_old_connections()
+
+
+def start_model_install_job(job: ModelInstallJob) -> None:
+    if connection.in_atomic_block:
+        run_model_install_job(job.id)
+        return
+    thread = threading.Thread(target=run_model_install_job, args=(job.id,), daemon=True)
+    thread.start()
+
+
+@csrf_exempt
+def model_install_jobs(request: HttpRequest):
+    session, error = require_admin(request)
+    if error:
+        return error
+
+    if request.method == "GET":
+        jobs = ModelInstallJob.objects.select_related("model").all()[:40]
+        return json_response({"ok": True, "jobs": [install_job_to_dict(job) for job in jobs]})
+
+    if request.method != "POST":
+        return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+
+    data = parse_json(request)
+    repo_id = data.get("repoId") or data.get("repo_id") or ""
+    filename = data.get("filename") or ""
+    model_type = data.get("modelType") or data.get("type") or "text"
+    quantization = data.get("quantization") or "Q4_K_M"
+    if not repo_id or not filename:
+        return json_response({"ok": False, "error": "repoId and filename are required"}, status=400)
+    if model_type not in {"text", "vision", "code"}:
+        return json_response({"ok": False, "error": "modelType must be text, vision, or code"}, status=400)
+    try:
+        validate_gguf_filename(filename)
+    except ValueError as exc:
+        return json_response({"ok": False, "error": str(exc)}, status=400)
+    if str(getattr(settings, "TTD_ALLOW_HF_DOWNLOAD", "1")) != "1":
+        return json_response({"ok": False, "error": "HuggingFace downloads are disabled by TTD_ALLOW_HF_DOWNLOAD"}, status=403)
+
+    job = ModelInstallJob.objects.create(
+        repo_id=repo_id,
+        filename=filename,
+        model_type=model_type,
+        quantization=quantization,
+        requested_by_ip=client_ip(request),
+        requested_by_user_agent=user_agent(request),
+    )
+    log_admin_action(request, f"Queued model install: {repo_id}/{filename}", session)
+    start_model_install_job(job)
+    job.refresh_from_db()
+    return json_response({"ok": True, "job": install_job_to_dict(job)}, status=201)
+
+
+@csrf_exempt
+def model_install_job_cancel(request: HttpRequest, job_id: UUID):
+    session, error = require_admin(request)
+    if error:
+        return error
+    if request.method != "POST":
+        return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+    job = ModelInstallJob.objects.select_related("model").filter(id=job_id).first()
+    if not job:
+        return json_response({"ok": False, "error": "Install job not found"}, status=404)
+    if job.status not in INSTALL_TERMINAL_STATUSES:
+        job.status = "cancelled"
+        job.error_details = "Cancelled by admin"
+        append_install_log(job, "Cancellation requested")
+        job.save(update_fields=["status", "error_details", "log", "updated_at"])
+        log_admin_action(request, f"Cancelled model install: {job.repo_id}/{job.filename}", session)
+    return json_response({"ok": True, "job": install_job_to_dict(job)})
+
+
+@csrf_exempt
+def model_install_job_retry(request: HttpRequest, job_id: UUID):
+    session, error = require_admin(request)
+    if error:
+        return error
+    if request.method != "POST":
+        return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+    old = ModelInstallJob.objects.filter(id=job_id).first()
+    if not old:
+        return json_response({"ok": False, "error": "Install job not found"}, status=404)
+    if old.status not in INSTALL_TERMINAL_STATUSES:
+        return json_response({"ok": False, "error": "Install job is still running"}, status=400)
+    job = ModelInstallJob.objects.create(
+        repo_id=old.repo_id,
+        filename=old.filename,
+        model_type=old.model_type,
+        quantization=old.quantization,
+        requested_by_ip=client_ip(request),
+        requested_by_user_agent=user_agent(request),
+    )
+    log_admin_action(request, f"Retried model install: {job.repo_id}/{job.filename}", session)
+    start_model_install_job(job)
+    job.refresh_from_db()
+    return json_response({"ok": True, "job": install_job_to_dict(job)}, status=201)
 
 
 @csrf_exempt

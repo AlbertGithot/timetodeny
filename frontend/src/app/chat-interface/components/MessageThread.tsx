@@ -9,6 +9,7 @@ interface Props {
   messages: Message[];
   isStreaming: boolean;
   messagesEndRef: React.RefObject<HTMLDivElement | null>;
+  onContinue?: (message: Message) => void;
 }
 
 type AssistantPart =
@@ -330,7 +331,52 @@ function GenerationActivity({ message }: { message: Message }) {
   );
 }
 
-function MessageBubble({ message }: { message: Message }) {
+function generationFailureHint(text: string): string {
+  const lower = text.toLowerCase();
+  if (lower.includes('timed out') || lower.includes('did not produce a token')) {
+    return 'Модель не успела выдать токен. В реестре выбери модель меньше, уменьши контекст или подними timeout.';
+  }
+  if (lower.includes('503') || lower.includes('service unavailable') || lower.includes('still not ready')) {
+    return 'llama.cpp еще грузит модель или упал при старте. Проверь runtime log в админке и нажми restart model.';
+  }
+  if (lower.includes('connection refused') || lower.includes('backend unavailable')) {
+    return 'llama-server не отвечает. Запусти лаунчер или перезапусти модель из реестра.';
+  }
+  return 'Генерация упала на backend. Ниже сырой текст ошибки, чтобы не гадать по кофейной гуще.';
+}
+
+function isGenerationFailure(message: Message): boolean {
+  const text = `${message.content}\n${message.testResult?.output || ''}`.toLowerCase();
+  return Boolean(
+    message.testResult?.passed === false
+    && (
+      text.includes('backend error')
+      || text.includes('llama.cpp')
+      || text.includes('generation failed')
+      || text.includes('service unavailable')
+      || text.includes('timed out')
+      || text.includes('connection refused')
+    )
+  );
+}
+
+function GenerationErrorCard({ message }: { message: Message }) {
+  const raw = message.testResult?.output || message.content || 'Unknown backend error';
+  return (
+    <div className="generation-error-card mt-3">
+      <div className="flex items-start gap-2">
+        <XCircle size={14} className="mt-0.5 flex-shrink-0 text-ttd-red" />
+        <div className="min-w-0">
+          <div className="generation-error-title">GENERATION FAILED</div>
+          <div className="generation-error-hint">{generationFailureHint(raw)}</div>
+          <pre className="generation-error-output">{raw}</pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MessageBubble({ message, onContinue }: { message: Message; onContinue?: (message: Message) => void }) {
   const [thinkingOpen, setThinkingOpen] = useState(false);
 
   if (message.role === 'system') {
@@ -374,7 +420,8 @@ function MessageBubble({ message }: { message: Message }) {
   const content = visibleAssistantContent(message.content);
   const contentParts = splitAssistantContent(content);
   const hasGeneratedFiles = Boolean(message.generatedFiles && message.generatedFiles.length > 0);
-  const hasBody = Boolean(contentParts.length > 0 || hasGeneratedFiles || message.testResult);
+  const hasGenerationFailure = isGenerationFailure(message);
+  const hasBody = Boolean(contentParts.length > 0 || hasGeneratedFiles || message.testResult || message.needsContinuation);
 
   return (
     <div className="px-4 py-3 animate-fade-in">
@@ -449,7 +496,9 @@ function MessageBubble({ message }: { message: Message }) {
             ))}
 
             {/* Test result */}
-            {message.testResult && (
+            {hasGenerationFailure ? (
+              <GenerationErrorCard message={message} />
+            ) : message.testResult && (
               <div className={`mt-3 flex items-start gap-2 px-3 py-2 rounded-sm border text-xs ${
                 message.testResult.passed
                   ? 'border-ttd-green/30 bg-[rgba(0,255,136,0.04)] text-ttd-green'
@@ -469,6 +518,19 @@ function MessageBubble({ message }: { message: Message }) {
                 </div>
               </div>
             )}
+
+            {message.needsContinuation && !message.streaming && (
+              <div className="mt-3">
+                <button
+                  type="button"
+                  onClick={() => onContinue?.(message)}
+                  className="ttd-btn ttd-btn-cyan text-[10px] px-3 py-1.5 flex items-center gap-1.5"
+                >
+                  <ChevronRight size={12} />
+                  CONTINUE RESPONSE
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -476,7 +538,7 @@ function MessageBubble({ message }: { message: Message }) {
   );
 }
 
-export default function MessageThread({ messages, isStreaming, messagesEndRef }: Props) {
+export default function MessageThread({ messages, isStreaming, messagesEndRef, onContinue }: Props) {
   return (
     <div className="flex-1 overflow-y-auto py-2">
       {messages.length === 0 ? (
@@ -487,7 +549,7 @@ export default function MessageThread({ messages, isStreaming, messagesEndRef }:
         </div>
       ) : (
         messages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} />
+          <MessageBubble key={msg.id} message={msg} onContinue={onContinue} />
         ))
       )}
       <div ref={messagesEndRef} />
