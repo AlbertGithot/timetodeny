@@ -24,7 +24,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from .chat_runtime import GenerationStopped, generation_slot, queue_status, raise_if_generation_stopped, request_generation_stop
-from .llama_runtime import ensure_llama_server, llama_runtime_status, restart_llama_server, stop_managed_llama
+from .llama_runtime import ensure_llama_server, llama_launch_check, llama_runtime_status, restart_llama_server, stop_managed_llama
 from .model_registry import delete_local_model_file, file_size_label, sync_model_registry_with_files
 from .models import AdminSession, AdminSetting, Attachment, Chat, GeneratedFile, Message, ModelInstallJob, ModelRegistry, RequestLog
 from .seed import ensure_defaults
@@ -61,6 +61,8 @@ from .workspaces import (
     cleanup_old_workspaces,
     apply_pending_workspace_file,
     create_workspace_zip,
+    delete_pending_workspace_file,
+    delete_workspace_file,
     diff_pending_workspace_file,
     diff_workspace_file,
     directory_size,
@@ -313,6 +315,29 @@ def health(request: HttpRequest):
     )
 
 
+def generation_runtime_payload() -> dict:
+    queue = queue_status()
+    active_message = None
+    for message in Message.objects.filter(role="assistant").order_by("-updated_at")[:20]:
+        generation = message.metadata.get("generation") if isinstance(message.metadata, dict) else None
+        if isinstance(generation, dict) and generation.get("status") == "streaming":
+            active_message = {
+                "chatId": str(message.chat_id),
+                "messageId": str(message.id),
+                **generation_to_dict(message, generation),
+            }
+            break
+
+    return {
+        "busy": bool(queue.get("busy")),
+        "queued": bool(queue.get("queuedAt")),
+        "currentChatId": queue.get("currentChatId"),
+        "startedSecondsAgo": int(queue.get("startedSecondsAgo") or 0),
+        "queuedSecondsAgo": int(queue.get("queuedSecondsAgo") or 0),
+        "active": active_message,
+    }
+
+
 def runtime_status(request: HttpRequest):
     ensure_defaults()
     sync_model_registry_with_files()
@@ -326,6 +351,7 @@ def runtime_status(request: HttpRequest):
                     "state": "ready",
                     "label": "mock ready",
                     "selectedModel": selected.name if selected else "mock",
+                    "generation": generation_runtime_payload(),
                 },
             }
         )
@@ -355,6 +381,7 @@ def runtime_status(request: HttpRequest):
                 "portOpen": runtime.get("portOpen"),
                 "ready": runtime.get("ready"),
                 "health": runtime.get("health"),
+                "generation": generation_runtime_payload(),
             },
         }
     )
@@ -1508,6 +1535,47 @@ def model_action(request: HttpRequest, model_id: UUID, action: str):
         ModelRegistry.objects.exclude(id=model.id).update(selected=False)
         model.selected = True
         stop_managed_llama()
+    elif action == "start":
+        if model.status != "ready" or not model.local_path or not Path(model.local_path).is_file():
+            sync_model_registry_with_files()
+            return json_response({"ok": False, "error": "Model file is missing. Reinstall the model first."}, status=400)
+        if model.model_type == "vision":
+            return json_response({"ok": False, "error": "Vision models cannot be launched as the chat response model."}, status=400)
+        ModelRegistry.objects.exclude(id=model.id).update(selected=False)
+        model.selected = True
+        model.save(update_fields=["selected", "updated_at"])
+        try:
+            runtime = restart_llama_server(model)
+        except Exception as exc:
+            log_admin_action(request, f"Model start failed: {model.name}: {exc}", session)
+            return json_response({"ok": False, "error": str(exc), "model": model_to_dict(model), "runtime": llama_runtime_status()}, status=502)
+        runtime["generation"] = generation_runtime_payload()
+        log_admin_action(request, f"Started llama.cpp model: {model.name}", session)
+        return json_response({"ok": True, "model": model_to_dict(model), "runtime": runtime})
+    elif action == "stop":
+        stop_managed_llama()
+        runtime = llama_runtime_status()
+        runtime["generation"] = generation_runtime_payload()
+        log_admin_action(request, f"Stopped llama.cpp from model card: {model.name}", session)
+        return json_response({"ok": True, "model": model_to_dict(model), "runtime": runtime})
+    elif action == "check":
+        check = llama_launch_check(model)
+        runtime = llama_runtime_status()
+        runtime["generation"] = generation_runtime_payload()
+        log_admin_action(request, f"Checked llama.cpp launch for model: {model.name}", session)
+        return json_response({"ok": True, "check": check, "model": model_to_dict(model), "runtime": runtime})
+    elif action == "instant-profile":
+        model.auto_select = True
+        model.use_for_instant = True
+        model.instant_context_messages = min(model.instant_context_messages or 4, 4)
+        if model.instant_max_tokens <= 0 or model.instant_max_tokens > 512:
+            model.instant_max_tokens = 512
+    elif action == "expert-profile":
+        model.auto_select = True
+        model.use_for_expert = True
+        model.expert_context_messages = max(model.expert_context_messages or 12, 12)
+        if 0 < model.expert_max_tokens < 2048:
+            model.expert_max_tokens = 2048
     elif action == "deselect":
         model.selected = False
     elif action == "hide":
@@ -1601,7 +1669,9 @@ def models_runtime(request: HttpRequest):
         return error
     sync_model_registry_with_files()
     log_admin_action(request, "Viewed llama.cpp runtime health", session)
-    return json_response({"ok": True, "runtime": llama_runtime_status()})
+    runtime = llama_runtime_status()
+    runtime["generation"] = generation_runtime_payload()
+    return json_response({"ok": True, "runtime": runtime})
 
 
 @csrf_exempt
@@ -1620,7 +1690,22 @@ def models_runtime_restart(request: HttpRequest):
     except Exception as exc:
         log_admin_action(request, f"llama.cpp restart failed: {exc}", session)
         return json_response({"ok": False, "error": str(exc), "runtime": llama_runtime_status()}, status=502)
+    runtime["generation"] = generation_runtime_payload()
     log_admin_action(request, f"Restarted llama.cpp runtime: {selected.name}", session)
+    return json_response({"ok": True, "runtime": runtime})
+
+
+@csrf_exempt
+def models_runtime_stop(request: HttpRequest):
+    session, error = require_admin(request)
+    if error:
+        return error
+    if request.method != "POST":
+        return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+    stop_managed_llama()
+    runtime = llama_runtime_status()
+    runtime["generation"] = generation_runtime_payload()
+    log_admin_action(request, "Stopped managed llama.cpp runtime", session)
     return json_response({"ok": True, "runtime": runtime})
 
 
@@ -1919,6 +2004,14 @@ def workspace_file(request: HttpRequest, chat_id: UUID):
             return json_response({"ok": True, "file": read_workspace_file(chat_id, relative_path)})
         except ValueError as exc:
             return json_response({"ok": False, "error": str(exc)}, status=400)
+    if request.method == "DELETE":
+        path = request.GET.get("path") or ""
+        try:
+            return json_response({"ok": True, "deleted": delete_workspace_file(chat_id, path)})
+        except FileNotFoundError:
+            return json_response({"ok": False, "error": "File not found"}, status=404)
+        except ValueError as exc:
+            return json_response({"ok": False, "error": str(exc)}, status=400)
     return json_response({"ok": False, "error": "Method not allowed"}, status=405)
 
 
@@ -1970,6 +2063,14 @@ def workspace_pending_file(request: HttpRequest, chat_id: UUID):
                     "diff": diff_pending_workspace_file(chat_id, relative_path),
                 }
             )
+        except ValueError as exc:
+            return json_response({"ok": False, "error": str(exc)}, status=400)
+    if request.method == "DELETE":
+        path = request.GET.get("path") or ""
+        try:
+            return json_response({"ok": True, "deleted": delete_pending_workspace_file(chat_id, path)})
+        except FileNotFoundError:
+            return json_response({"ok": False, "error": "Pending file not found"}, status=404)
         except ValueError as exc:
             return json_response({"ok": False, "error": str(exc)}, status=400)
     return json_response({"ok": False, "error": "Method not allowed"}, status=405)

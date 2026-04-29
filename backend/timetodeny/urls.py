@@ -31,6 +31,7 @@ urlpatterns = [
     path("api/models/import-local", views.models_import_local),
     path("api/models/runtime", views.models_runtime),
     path("api/models/restart", views.models_runtime_restart),
+    path("api/models/stop", views.models_runtime_stop),
     path("api/models/show-all", views.models_show_all),
     path("api/models/hide-all", views.models_hide_all),
     path("api/models/compatibility", views.models_compatibility),

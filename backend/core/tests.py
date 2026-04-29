@@ -315,6 +315,77 @@ class ApiSmokeTests(TestCase):
         self.assertTrue(response.json()["runtime"]["running"])
         restart.assert_called_once()
 
+    def test_model_runtime_registry_actions_and_profiles(self) -> None:
+        model_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(model_dir.cleanup)
+        model_path = Path(model_dir.name) / "runtime-actions.gguf"
+        model_path.write_bytes(b"gguf")
+        model = ModelRegistry.objects.create(
+            name="runtime-actions",
+            repo_id="local",
+            filename="runtime-actions.gguf",
+            status="ready",
+            selected=False,
+            local_path=str(model_path),
+            instant_max_tokens=4096,
+            expert_max_tokens=256,
+        )
+        login = self.client.post(
+            "/api/admin/login",
+            data=json.dumps({"password": "1111"}),
+            content_type="application/json",
+        )
+        token = login.json()["token"]
+
+        with patch(
+            "core.views.llama_launch_check",
+            return_value={"ok": True, "message": "Launch check passed.", "errors": [], "warnings": []},
+        ):
+            check = self.client.post(
+                f"/api/models/{model.id}/check",
+                data=json.dumps({}),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=f"Bearer {token}",
+            )
+        with patch("core.views.restart_llama_server", return_value={"running": True, "selectedModel": "runtime-actions"}) as restart:
+            start = self.client.post(
+                f"/api/models/{model.id}/start",
+                data=json.dumps({}),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=f"Bearer {token}",
+            )
+        with patch("core.views.stop_managed_llama") as stop_llama:
+            stop = self.client.post(
+                f"/api/models/{model.id}/stop",
+                data=json.dumps({}),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=f"Bearer {token}",
+            )
+        instant = self.client.post(
+            f"/api/models/{model.id}/instant-profile",
+            data=json.dumps({}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        expert = self.client.post(
+            f"/api/models/{model.id}/expert-profile",
+            data=json.dumps({}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+
+        self.assertEqual(check.status_code, 200)
+        self.assertTrue(check.json()["check"]["ok"])
+        self.assertEqual(start.status_code, 200)
+        self.assertTrue(ModelRegistry.objects.get(id=model.id).selected)
+        restart.assert_called_once()
+        self.assertEqual(stop.status_code, 200)
+        stop_llama.assert_called_once()
+        self.assertEqual(instant.status_code, 200)
+        self.assertLessEqual(instant.json()["model"]["performance"]["instantMaxTokens"], 512)
+        self.assertEqual(expert.status_code, 200)
+        self.assertGreaterEqual(expert.json()["model"]["performance"]["expertMaxTokens"], 2048)
+
     def test_model_settings_are_saved_from_registry(self) -> None:
         model_path = Path(tempfile.mkdtemp()) / "speed.gguf"
         self.addCleanup(lambda: model_path.parent.exists() and shutil.rmtree(model_path.parent, ignore_errors=True))
@@ -513,6 +584,8 @@ class ApiSmokeTests(TestCase):
                 content_type="application/json",
             )
             archive = self.client.get(f"/api/workspaces/{chat.id}/zip")
+            delete = self.client.delete(f"/api/workspaces/{chat.id}/file?path=app.py")
+            tree_after_delete = self.client.get(f"/api/workspaces/{chat.id}")
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
@@ -530,6 +603,8 @@ class ApiSmokeTests(TestCase):
         self.assertEqual(archive.status_code, 200)
         with zipfile.ZipFile(BytesIO(b"".join(archive.streaming_content))) as zipped:
             self.assertEqual(zipped.namelist(), ["app.py"])
+        self.assertEqual(delete.status_code, 200)
+        self.assertEqual(tree_after_delete.json()["workspace"]["files"], [])
 
     def test_model_file_artifact_parser_stages_workspace_file(self) -> None:
         generated_dir = tempfile.TemporaryDirectory()

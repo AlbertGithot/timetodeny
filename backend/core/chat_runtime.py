@@ -17,6 +17,7 @@ _current: dict[str, object] = {"chat_id": None, "started_at": None, "queued_at":
 
 
 def queue_status() -> dict:
+    now = time.monotonic()
     with _state_lock:
         started_at = _current.get("started_at")
         queued_at = _current.get("queued_at")
@@ -26,6 +27,8 @@ def queue_status() -> dict:
             "currentChatId": _current.get("chat_id"),
             "startedAt": started_at,
             "queuedAt": queued_at,
+            "startedSecondsAgo": max(0.0, now - started_at) if isinstance(started_at, (int, float)) else 0.0,
+            "queuedSecondsAgo": max(0.0, now - queued_at) if isinstance(queued_at, (int, float)) else 0.0,
         }
 
 

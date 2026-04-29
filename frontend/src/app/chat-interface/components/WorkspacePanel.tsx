@@ -14,10 +14,11 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  Trash2,
   XCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { apiUrl, getJson, postJson } from '@/lib/api';
+import { apiUrl, deleteJson, getJson, postJson } from '@/lib/api';
 
 interface WorkspaceFile {
   path: string;
@@ -82,6 +83,15 @@ interface TestResponse {
     passed: boolean;
     blocked?: boolean;
     output: string;
+  };
+}
+
+interface DeleteResponse {
+  ok: boolean;
+  deleted: {
+    path: string;
+    name: string;
+    size?: number;
   };
 }
 
@@ -381,6 +391,27 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
     }
   };
 
+  const handleDeleteSelected = async () => {
+    if (!chatId || !selectedPath) return;
+    const currentPath = selectedPath;
+    const endpoint = selectedKind === 'pending'
+      ? `/workspaces/${chatId}/pending/file?path=${encodeURIComponent(currentPath)}`
+      : `/workspaces/${chatId}/file?path=${encodeURIComponent(currentPath)}`;
+    try {
+      const payload = await deleteJson<DeleteResponse>(endpoint);
+      setSelectedPath('');
+      setSelectedKind('file');
+      setContent('');
+      setOriginalContent('');
+      setDiff('');
+      setTestResult(null);
+      loadWorkspace();
+      toast.success(`Deleted ${payload.deleted.path}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Delete failed');
+    }
+  };
+
   if (!chatId || loadedChatId !== chatId || (files.length === 0 && pendingChanges.length === 0)) {
     return null;
   }
@@ -499,6 +530,10 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
             <button onClick={handleSave} disabled={!selectedEntry || !dirty || saving} className="ttd-btn ttd-btn-cyan text-[10px] px-2 py-1 flex items-center gap-1 disabled:opacity-40" title="Save edited file">
               <Save size={10} />
               {saving ? 'SAVING' : 'SAVE'}
+            </button>
+            <button onClick={handleDeleteSelected} disabled={!selectedEntry} className="ttd-btn ttd-btn-red text-[10px] px-2 py-1 flex items-center gap-1 disabled:opacity-40" title="Delete selected file">
+              <Trash2 size={10} />
+              DELETE
             </button>
           </div>
 

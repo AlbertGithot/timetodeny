@@ -15,6 +15,11 @@ from django.conf import settings
 
 from .models import ModelRegistry
 
+try:
+    import psutil
+except ImportError:  # pragma: no cover - requirements include psutil, this keeps fallback sane.
+    psutil = None
+
 
 def _project_root() -> Path:
     return Path(settings.PROJECT_ROOT)
@@ -117,6 +122,79 @@ def _log_tail(lines: int = 40) -> str:
     return "\n".join(content[-lines:])
 
 
+def _bytes_label(value: int | float | None) -> str:
+    amount = float(value or 0)
+    if amount <= 0:
+        return "-"
+    gb = amount / (1024**3)
+    if gb >= 1:
+        return f"{gb:.2f}GB"
+    mb = amount / (1024**2)
+    if mb >= 1:
+        return f"{mb:.1f}MB"
+    kb = amount / 1024
+    if kb >= 1:
+        return f"{kb:.1f}KB"
+    return f"{int(amount)}B"
+
+
+def _duration_label(seconds: int | float | None) -> str:
+    value = int(seconds or 0)
+    if value <= 0:
+        return "-"
+    minutes, sec = divmod(value, 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {sec}s"
+    return f"{sec}s"
+
+
+def _process_info(pid: int | None, source: str) -> dict | None:
+    if not psutil or not pid:
+        return None
+    try:
+        proc = psutil.Process(pid)
+        with proc.oneshot():
+            memory = proc.memory_info().rss
+            created = proc.create_time()
+            uptime = max(0, int(time.time() - created))
+            cmdline = " ".join(proc.cmdline())
+            return {
+                "pid": proc.pid,
+                "source": source,
+                "name": proc.name(),
+                "status": proc.status(),
+                "cpuPercent": proc.cpu_percent(interval=0.0),
+                "memoryRss": memory,
+                "memoryRssLabel": _bytes_label(memory),
+                "createdAt": int(created),
+                "uptimeSeconds": uptime,
+                "uptimeLabel": _duration_label(uptime),
+                "cmdline": cmdline,
+            }
+    except (psutil.Error, OSError):
+        return None
+
+
+def _process_for_port(port: int) -> dict | None:
+    if not psutil:
+        return None
+    try:
+        for conn in psutil.net_connections(kind="tcp"):
+            if not conn.laddr or conn.status != psutil.CONN_LISTEN:
+                continue
+            if conn.laddr.port == port and conn.pid:
+                return _process_info(conn.pid, "port")
+    except (psutil.Error, OSError):
+        return None
+    return None
+
+
 def stop_managed_llama() -> None:
     pid = _read_managed_pid()
     if not pid or not _pid_running(pid):
@@ -192,21 +270,28 @@ def _find_llama_server_binary() -> Path | None:
 
 def llama_runtime_status() -> dict:
     pid = _read_managed_pid()
+    host, port = _llama_host_port()
     selected = ModelRegistry.objects.filter(selected=True, status="ready").first()
     model_path = _selected_model_path(selected)
     binary = _find_llama_server_binary()
     port_open = _port_open()
     ready, health = _llama_ready() if port_open else (False, "port closed")
     pid_running = bool(pid and _pid_running(pid))
+    process = _process_info(pid, "managed") if pid_running else None
+    if not process and port_open:
+        process = _process_for_port(port)
     return {
         "backend": settings.TTD_MODEL_BACKEND,
         "url": settings.TTD_LLAMA_CPP_URL,
+        "host": host,
+        "port": port,
         "portOpen": port_open,
         "ready": ready,
         "health": health,
         "running": ready,
         "managedPid": pid,
         "managedPidRunning": pid_running,
+        "process": process,
         "selectedModel": selected.name if selected else None,
         "modelPath": str(model_path) if model_path else None,
         "modelFileExists": bool(model_path and model_path.is_file()),
@@ -220,6 +305,45 @@ def llama_runtime_status() -> dict:
             "gpuLayers": selected.llama_gpu_layers if selected and selected.llama_gpu_layers >= 0 else None,
             "promptCache": selected.prompt_cache_enabled if selected else True,
         },
+    }
+
+
+def llama_launch_check(model: ModelRegistry | None = None) -> dict:
+    selected = model or ModelRegistry.objects.filter(selected=True, status="ready").first()
+    model_path = _selected_model_path(selected)
+    binary = _find_llama_server_binary()
+    host, port = _llama_host_port()
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if settings.TTD_MODEL_BACKEND not in {"llamacpp", "llama.cpp"}:
+        warnings.append(f"Backend is {settings.TTD_MODEL_BACKEND}, llama.cpp launch is disabled.")
+    if not selected:
+        errors.append("No ready model selected.")
+    elif selected.model_type == "vision":
+        errors.append("Vision models cannot be launched as the chat response model.")
+    if not model_path or not model_path.is_file():
+        errors.append(f"GGUF file is missing in {settings.TTD_MODEL_DIR}.")
+    if not binary:
+        errors.append("llama-server binary was not found.")
+
+    ready, health = _llama_ready() if _port_open() else (False, "port closed")
+    if ready and selected and model_path:
+        warnings.append("llama-server is already responding on the configured port.")
+
+    return {
+        "ok": not errors,
+        "message": "Launch check passed." if not errors else "Launch check failed.",
+        "errors": errors,
+        "warnings": warnings,
+        "model": selected.name if selected else None,
+        "modelPath": str(model_path) if model_path else None,
+        "binary": str(binary) if binary else None,
+        "url": settings.TTD_LLAMA_CPP_URL,
+        "host": host,
+        "port": port,
+        "ready": ready,
+        "health": health,
     }
 
 

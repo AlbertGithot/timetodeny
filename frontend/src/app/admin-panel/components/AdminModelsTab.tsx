@@ -126,6 +126,13 @@ interface ModelResponse {
   model: ModelEntry;
 }
 
+interface ModelActionResponse {
+  ok: boolean;
+  model: ModelEntry;
+  runtime?: RuntimeInfo;
+  check?: LaunchCheck;
+}
+
 interface SearchResponse {
   ok: boolean;
   results: SearchResult[];
@@ -144,12 +151,42 @@ interface InstallJobResponse {
 interface RuntimeInfo {
   backend: string;
   url: string;
+  host?: string;
+  port?: number;
   portOpen: boolean;
   ready?: boolean;
   health?: string;
   running: boolean;
   managedPid?: number | null;
   managedPidRunning: boolean;
+  process?: {
+    pid: number;
+    source: string;
+    name: string;
+    status: string;
+    cpuPercent: number;
+    memoryRss: number;
+    memoryRssLabel: string;
+    uptimeSeconds: number;
+    uptimeLabel: string;
+    cmdline: string;
+  } | null;
+  generation?: {
+    busy: boolean;
+    queued: boolean;
+    currentChatId?: string | null;
+    startedSecondsAgo: number;
+    queuedSecondsAgo: number;
+    active?: {
+      chatId: string;
+      messageId: string;
+      status: string;
+      phase: string;
+      activity: string;
+      progress: number;
+      etaLabel?: string;
+    } | null;
+  };
   selectedModel?: string | null;
   modelPath?: string | null;
   modelFileExists: boolean;
@@ -157,6 +194,21 @@ interface RuntimeInfo {
   binaryExists: boolean;
   logFile: string;
   logTail: string;
+}
+
+interface LaunchCheck {
+  ok: boolean;
+  message: string;
+  errors: string[];
+  warnings: string[];
+  model?: string | null;
+  modelPath?: string | null;
+  binary?: string | null;
+  url: string;
+  host: string;
+  port: number;
+  ready: boolean;
+  health: string;
 }
 
 interface RuntimeResponse {
@@ -429,6 +481,56 @@ export default function AdminModelsTab() {
     }
   };
 
+  const handleRuntimeStop = async () => {
+    setRuntimeBusy(true);
+    try {
+      const payload = await postJson<RuntimeResponse>('/models/stop', {}, true);
+      setRuntime(payload.runtime);
+      toast('llama.cpp stopped');
+    } catch (error) {
+      loadRuntime();
+      toast.error(error instanceof Error ? error.message : 'Runtime stop failed');
+    } finally {
+      setRuntimeBusy(false);
+    }
+  };
+
+  const handleModelRuntimeAction = async (id: string, action: 'start' | 'stop' | 'check') => {
+    setRuntimeBusy(true);
+    try {
+      const payload = await postJson<ModelActionResponse>(`/models/${id}/${action}`, {}, true);
+      setModels(prev => prev.map(m => m.id === id ? payload.model : action === 'start' ? { ...m, selected: false } : m));
+      if (payload.runtime) setRuntime(payload.runtime);
+      if (action === 'start') toast.success(`${payload.model.name} started`);
+      if (action === 'stop') toast('llama.cpp stopped');
+      if (action === 'check') {
+        const warnings = payload.check?.warnings?.length ? ` · ${payload.check.warnings.join(' · ')}` : '';
+        const errors = payload.check?.errors?.length ? ` · ${payload.check.errors.join(' · ')}` : '';
+        if (payload.check?.ok) {
+          toast.success(`${payload.check?.message || 'Launch check passed'}${warnings}`);
+        } else {
+          toast.error(`${payload.check?.message || 'Launch check failed'}${errors}`);
+        }
+      }
+    } catch (error) {
+      loadRuntime();
+      toast.error(error instanceof Error ? error.message : `${action} failed`);
+    } finally {
+      setRuntimeBusy(false);
+    }
+  };
+
+  const handleQuickProfile = async (id: string, profile: 'instant-profile' | 'expert-profile') => {
+    try {
+      const payload = await postJson<ModelResponse>(`/models/${id}/${profile}`, {}, true);
+      setModels(prev => prev.map(m => m.id === id ? payload.model : m));
+      setSettingsDraft(normalizePerformance(payload.model.performance));
+      toast.success(profile === 'instant-profile' ? 'Instant profile applied' : 'Expert profile applied');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Profile update failed');
+    }
+  };
+
   const handleImportLocal = async () => {
     try {
       const payload = await postJson<ImportLocalResponse>('/models/import-local', {}, true);
@@ -527,6 +629,15 @@ export default function AdminModelsTab() {
               <RefreshCw size={10} className={runtimeBusy ? 'animate-spin' : ''} />
               RESTART MODEL
             </button>
+            <button
+              type="button"
+              onClick={() => void handleRuntimeStop()}
+              disabled={runtimeBusy || !runtime?.managedPid}
+              className="ttd-btn ttd-btn-red text-[10px] px-3 py-1 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Square size={10} />
+              STOP
+            </button>
           </div>
         </div>
         <div className="p-4 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(280px,420px)] gap-4">
@@ -534,6 +645,12 @@ export default function AdminModelsTab() {
             <div className="bg-ttd-elevated rounded-sm px-3 py-2">
               <div className="text-ttd-dim mb-1">URL</div>
               <div className="text-ttd-cyan font-mono truncate" title={runtime?.url}>{runtime?.url || '-'}</div>
+            </div>
+            <div className="bg-ttd-elevated rounded-sm px-3 py-2">
+              <div className="text-ttd-dim mb-1">PORT</div>
+              <div className="text-ttd-text font-mono">
+                {runtime?.host || '-'}:{runtime?.port || '-'} · {runtime?.portOpen ? 'open' : 'closed'}
+              </div>
             </div>
             <div className="bg-ttd-elevated rounded-sm px-3 py-2">
               <div className="text-ttd-dim mb-1">PID</div>
@@ -549,12 +666,50 @@ export default function AdminModelsTab() {
               <div className="text-ttd-dim mb-1">BINARY</div>
               <div className="text-ttd-text font-mono truncate" title={runtime?.binary || ''}>{runtime?.binary || '-'}</div>
             </div>
+            <div className="bg-ttd-elevated rounded-sm px-3 py-2">
+              <div className="text-ttd-dim mb-1">PROCESS</div>
+              <div className="text-ttd-text font-mono truncate" title={runtime?.process?.cmdline || ''}>
+                {runtime?.process ? `${runtime.process.name} · ${runtime.process.source}` : '-'}
+              </div>
+            </div>
+            <div className="bg-ttd-elevated rounded-sm px-3 py-2">
+              <div className="text-ttd-dim mb-1">LOAD</div>
+              <div className="text-ttd-text font-mono">
+                {runtime?.process ? `${runtime.process.cpuPercent.toFixed(1)}% CPU · ${runtime.process.memoryRssLabel} RAM` : '-'}
+              </div>
+            </div>
+            <div className="bg-ttd-elevated rounded-sm px-3 py-2">
+              <div className="text-ttd-dim mb-1">UPTIME</div>
+              <div className="text-ttd-text font-mono">{runtime?.process?.uptimeLabel || '-'}</div>
+            </div>
+            <div className="bg-ttd-elevated rounded-sm px-3 py-2">
+              <div className="text-ttd-dim mb-1">GENERATION QUEUE</div>
+              <div className="text-ttd-text font-mono truncate" title={runtime?.generation?.active?.activity || ''}>
+                {runtime?.generation?.active
+                  ? `${runtime.generation.active.phase} · ${runtime.generation.active.progress}% · ETA ${runtime.generation.active.etaLabel || '-'}`
+                  : runtime?.generation?.busy ? 'busy' : 'idle'}
+              </div>
+            </div>
             <div className="md:col-span-2 bg-ttd-elevated rounded-sm px-3 py-2">
               <div className="text-ttd-dim mb-1">MODEL FILE</div>
               <div className={`${runtime?.modelFileExists ? 'text-ttd-green' : 'text-ttd-red'} font-mono truncate`} title={runtime?.modelPath || ''}>
                 {runtime?.modelPath || 'No selected local model file'}
               </div>
             </div>
+            {runtime?.generation?.active && (
+              <div className="md:col-span-2 bg-ttd-bg border border-ttd-green/25 rounded-sm px-3 py-2">
+                <div className="flex items-center justify-between gap-3 mb-1">
+                  <div className="text-ttd-green text-[10px] tracking-wider uppercase">Active request</div>
+                  <div className="text-ttd-green font-mono text-[10px]">{runtime.generation.active.progress}%</div>
+                </div>
+                <div className="progress-bar-track">
+                  <div className="progress-bar-fill-green" style={{ width: `${Math.max(1, Math.min(99, runtime.generation.active.progress))}%` }} />
+                </div>
+                <div className="text-[10px] text-ttd-muted mt-2 truncate" title={runtime.generation.active.activity}>
+                  {runtime.generation.active.activity}
+                </div>
+              </div>
+            )}
           </div>
           <div className="bg-ttd-bg border border-ttd-border rounded-sm p-3 min-h-36">
             <div className="text-[10px] text-ttd-muted mb-2 tracking-wider uppercase truncate" title={runtime?.logFile || ''}>
@@ -1208,6 +1363,44 @@ export default function AdminModelsTab() {
               )}
 
               <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={() => void handleModelRuntimeAction(detailModel.id, 'check')}
+                  disabled={runtimeBusy || detailModel.status !== 'ready'}
+                  className="ttd-btn ttd-btn-ghost text-[10px] px-3 py-1 flex items-center gap-1 disabled:opacity-40"
+                >
+                  <Activity size={10} />
+                  CHECK
+                </button>
+                <button
+                  onClick={() => void handleModelRuntimeAction(detailModel.id, 'start')}
+                  disabled={runtimeBusy || detailModel.status !== 'ready' || detailModel.type === 'vision'}
+                  className="ttd-btn ttd-btn-green text-[10px] px-3 py-1 flex items-center gap-1 disabled:opacity-40"
+                >
+                  <Play size={10} />
+                  START
+                </button>
+                <button
+                  onClick={() => void handleModelRuntimeAction(detailModel.id, 'stop')}
+                  disabled={runtimeBusy || !runtime?.managedPid}
+                  className="ttd-btn ttd-btn-red text-[10px] px-3 py-1 flex items-center gap-1 disabled:opacity-40"
+                >
+                  <Square size={10} />
+                  STOP
+                </button>
+                <button
+                  onClick={() => void handleQuickProfile(detailModel.id, 'instant-profile')}
+                  disabled={detailModel.type === 'vision'}
+                  className="ttd-btn ttd-btn-cyan text-[10px] px-3 py-1 flex items-center gap-1 disabled:opacity-40"
+                >
+                  INSTANT
+                </button>
+                <button
+                  onClick={() => void handleQuickProfile(detailModel.id, 'expert-profile')}
+                  disabled={detailModel.type === 'vision'}
+                  className="ttd-btn ttd-btn-ghost text-[10px] px-3 py-1 flex items-center gap-1 disabled:opacity-40"
+                >
+                  EXPERT
+                </button>
                 {detailModel.selected ? (
                   <button onClick={() => void handleDeselect(detailModel.id)} className="ttd-btn ttd-btn-ghost text-[10px] px-3 py-1 flex items-center gap-1">
                     <Square size={10} />

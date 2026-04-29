@@ -255,8 +255,7 @@ def diff_pending_workspace_file(chat_id: str | UUID, relative_path: str) -> dict
     }
 
 
-def _cleanup_empty_pending_dirs(chat_id: str | UUID, start: Path) -> None:
-    root = workspace_pending_root(chat_id)
+def _cleanup_empty_dirs(root: Path, start: Path) -> None:
     parent = start.parent
     while parent != root and root in parent.parents:
         try:
@@ -264,6 +263,14 @@ def _cleanup_empty_pending_dirs(chat_id: str | UUID, start: Path) -> None:
         except OSError:
             break
         parent = parent.parent
+
+
+def _cleanup_empty_pending_dirs(chat_id: str | UUID, start: Path) -> None:
+    _cleanup_empty_dirs(workspace_pending_root(chat_id), start)
+
+
+def _cleanup_empty_workspace_dirs(chat_id: str | UUID, start: Path) -> None:
+    _cleanup_empty_dirs(workspace_root(chat_id), start)
 
 
 def apply_pending_workspace_file(chat_id: str | UUID, relative_path: str) -> dict:
@@ -288,6 +295,25 @@ def reject_pending_workspace_file(chat_id: str | UUID, relative_path: str) -> di
     pending.unlink()
     _cleanup_empty_pending_dirs(chat_id, pending)
     return info
+
+
+def delete_workspace_file(chat_id: str | UUID, relative_path: str) -> dict:
+    path = safe_workspace_path(chat_id, relative_path)
+    if not path.is_file():
+        raise FileNotFoundError(relative_path)
+    save_version(chat_id, relative_path, path)
+    info = {
+        "path": str(safe_relative_path(relative_path)),
+        "name": path.name,
+        "size": path.stat().st_size,
+    }
+    path.unlink()
+    _cleanup_empty_workspace_dirs(chat_id, path)
+    return info
+
+
+def delete_pending_workspace_file(chat_id: str | UUID, relative_path: str) -> dict:
+    return reject_pending_workspace_file(chat_id, relative_path)
 
 
 def rollback_workspace_file(chat_id: str | UUID, relative_path: str) -> dict:
