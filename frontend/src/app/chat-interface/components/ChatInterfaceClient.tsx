@@ -48,7 +48,7 @@ export interface Message {
   tokensPerSec?: number;
   totalTokens?: number;
   needsContinuation?: boolean;
-  testResult?: { passed: boolean; output: string };
+  testResult?: { passed: boolean; blocked?: boolean; output: string };
 }
 
 interface ChatDetailResponse {

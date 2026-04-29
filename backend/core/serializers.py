@@ -58,7 +58,11 @@ def message_to_dict(message: Message) -> dict:
     if generated:
         payload["generatedFiles"] = generated
     if message.test_passed is not None:
-        payload["testResult"] = {"passed": message.test_passed, "output": message.test_output}
+        payload["testResult"] = {
+            "passed": message.test_passed,
+            "blocked": "TESTS BLOCKED" in (message.test_output or ""),
+            "output": message.test_output,
+        }
     return payload
 
 

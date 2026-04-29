@@ -7,6 +7,7 @@ import re
 import shutil
 import socket
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -124,6 +125,87 @@ def language_from_filename(filename: str, fallback: str = "text") -> str:
 
 def should_test_generated_file(language: str) -> bool:
     return language in {"python", "html", "json"}
+
+
+MALWARE_TERMS = {
+    "virus",
+    "malware",
+    "ransomware",
+    "trojan",
+    "keylogger",
+    "botnet",
+    "worm",
+    "stealer",
+    "backdoor",
+    "reverse shell",
+    "remote access trojan",
+    "вирус",
+    "малвар",
+    "вредонос",
+    "троян",
+    "кейлоггер",
+    "ботнет",
+    "червь",
+    "стилер",
+    "шифровальщик",
+    "бекдор",
+    "ратник",
+}
+
+MALWARE_VERBS = {
+    "create",
+    "build",
+    "write",
+    "make",
+    "generate",
+    "создай",
+    "сделай",
+    "напиши",
+    "сгенерируй",
+    "разработай",
+    "собери",
+}
+
+MALWARE_CODE_MARKERS = (
+    "pynput.keyboard",
+    "keyboard.hook",
+    "getasynckeystate",
+    "setwindowshookex",
+    "cryptography.fernet",
+    "os.walk(",
+    "winreg.hkey_current_user",
+    "software\\microsoft\\windows\\currentversion\\run",
+    "/bin/sh -i",
+    "nc -e",
+    "powershell -enc",
+)
+
+
+def looks_like_malware_request(prompt: str) -> bool:
+    text = (prompt or "").lower()
+    has_term = any(term in text for term in MALWARE_TERMS)
+    if not has_term:
+        return False
+    return any(verb in text for verb in MALWARE_VERBS) or "код" in text or "code" in text
+
+
+def looks_like_malware_content(filename: str, content: str) -> bool:
+    text = f"{filename}\n{content}".lower()
+    if any(term in text for term in MALWARE_TERMS):
+        return True
+    marker_count = sum(1 for marker in MALWARE_CODE_MARKERS if marker in text)
+    return marker_count >= 2
+
+
+def should_block_generated_test(prompt: str, filename: str, content: str) -> bool:
+    return looks_like_malware_request(prompt) or looks_like_malware_content(filename, content)
+
+
+def safety_blocked_test_output() -> str:
+    return (
+        "TESTS BLOCKED BY SAFETY POLICY: request or generated content looks like malware. "
+        "No compile/run/test command was executed."
+    )
 
 
 def artifact_protocol_prompt() -> str:
@@ -315,18 +397,28 @@ def test_generated_file(path: Path, language: str) -> tuple[bool, str]:
     return True, "File write smoke check: OK"
 
 
+def test_generated_content(content: str, filename: str, language: str) -> tuple[bool, str]:
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / safe_filename(Path(filename).name, f"generated.{language or 'txt'}")
+        target.write_text(content, encoding="utf-8")
+        return test_generated_file(target, language)
+
+
 def create_code_artifact(prompt: str, chat_id: str | None = None) -> tuple[ArtifactDraft, bool, str]:
     name, language = infer_file(prompt)
     content = build_code(prompt, name, language)
     if chat_id:
-        from .workspaces import write_workspace_file
+        from .workspaces import stage_workspace_file
 
-        disk_path = write_workspace_file(chat_id, name, content)
+        disk_path = stage_workspace_file(chat_id, name, content)
     else:
         disk_name = f"{uuid.uuid4().hex}_{safe_filename(name, 'generated.txt')}"
         disk_path = generated_dir("files") / disk_name
-    disk_path.write_text(content, encoding="utf-8")
-    passed, output = test_generated_file(disk_path, language)
+        disk_path.write_text(content, encoding="utf-8")
+    if should_block_generated_test(prompt, name, content):
+        passed, output = False, safety_blocked_test_output()
+    else:
+        passed, output = test_generated_content(content, name, language)
     return ArtifactDraft(name=name, language=language, content=content, file_type="code", disk_path=str(disk_path)), passed, output
 
 
@@ -339,13 +431,14 @@ def create_model_file_artifacts(
     run_tests: bool = True,
     max_test_files: int = 2,
 ) -> tuple[list[ArtifactDraft], bool | None, str, str]:
-    from .workspaces import write_workspace_file
+    from .workspaces import stage_workspace_file
 
     artifacts: list[ArtifactDraft] = []
     test_outputs: list[str] = []
     passed_values: list[bool] = []
     consumed_ranges: list[tuple[int, int]] = []
     tested_files = 0
+    safety_blocked = False
 
     explicit_pattern = re.compile(
         r"```(?:ttd-file|file)\s+(?:path=)?[\"']?(?P<path>[^\"'\n`]+)[\"']?\s*\n(?P<content>.*?)```",
@@ -358,9 +451,13 @@ def create_model_file_artifacts(
             continue
         relative_path = _safe_generated_relative_path(raw_path, infer_file(prompt)[0])
         language = language_from_filename(relative_path)
-        disk_path = write_workspace_file(chat_id, relative_path, content)
-        if run_tests and should_test_generated_file(language) and tested_files < max_test_files:
-            passed, output = test_generated_file(disk_path, language)
+        disk_path = stage_workspace_file(chat_id, relative_path, content)
+        blocked = should_block_generated_test(prompt, relative_path, content)
+        if blocked:
+            safety_blocked = True
+            passed, output = False, safety_blocked_test_output()
+        elif run_tests and should_test_generated_file(language) and tested_files < max_test_files:
+            passed, output = test_generated_content(content, relative_path, language)
             tested_files += 1
         else:
             passed, output = True, "Test skipped by model registry policy."
@@ -376,9 +473,13 @@ def create_model_file_artifacts(
             fallback_name, fallback_language = infer_file(prompt)
             content = match.group("content").strip("\n")
             language = language_from_filename(fallback_name, match.group("language") or fallback_language)
-            disk_path = write_workspace_file(chat_id, fallback_name, content)
-            if run_tests and should_test_generated_file(language) and tested_files < max_test_files:
-                passed, output = test_generated_file(disk_path, language)
+            disk_path = stage_workspace_file(chat_id, fallback_name, content)
+            blocked = should_block_generated_test(prompt, fallback_name, content)
+            if blocked:
+                safety_blocked = True
+                passed, output = False, safety_blocked_test_output()
+            elif run_tests and should_test_generated_file(language) and tested_files < max_test_files:
+                passed, output = test_generated_content(content, fallback_name, language)
                 tested_files += 1
             else:
                 passed, output = True, "Test skipped by model registry policy."
@@ -390,9 +491,13 @@ def create_model_file_artifacts(
     if allow_fallback and not artifacts and response.strip():
         fallback_name, fallback_language = infer_file(prompt)
         content = response.strip()
-        disk_path = write_workspace_file(chat_id, fallback_name, content)
-        if run_tests and should_test_generated_file(fallback_language) and tested_files < max_test_files:
-            passed, output = test_generated_file(disk_path, fallback_language)
+        disk_path = stage_workspace_file(chat_id, fallback_name, content)
+        blocked = should_block_generated_test(prompt, fallback_name, content)
+        if blocked:
+            safety_blocked = True
+            passed, output = False, safety_blocked_test_output()
+        elif run_tests and should_test_generated_file(fallback_language) and tested_files < max_test_files:
+            passed, output = test_generated_content(content, fallback_name, fallback_language)
             tested_files += 1
         else:
             passed, output = True, "Test skipped by model registry policy."
@@ -406,7 +511,10 @@ def create_model_file_artifacts(
     cleaned_response = cleaned_response.strip()
     if artifacts:
         file_list = ", ".join(f"`{artifact.name}`" for artifact in artifacts)
-        cleaned_response = f"Создал файл(ы): {file_list}." + (f"\n\n{cleaned_response}" if cleaned_response else "")
+        prefix = f"Подготовил файл(ы) к применению: {file_list}. Проверь diff и нажми APPLY в панели Files."
+        if safety_blocked:
+            prefix += " Автотесты отключены политикой безопасности."
+        cleaned_response = prefix + (f"\n\n{cleaned_response}" if cleaned_response else "")
 
     aggregate_passed = all(passed_values) if passed_values else None
     return artifacts, aggregate_passed, "\n".join(test_outputs), cleaned_response

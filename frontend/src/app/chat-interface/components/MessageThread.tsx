@@ -500,11 +500,13 @@ function MessageBubble({ message, onContinue }: { message: Message; onContinue?:
               <GenerationErrorCard message={message} />
             ) : message.testResult && (
               <div className={`mt-3 flex items-start gap-2 px-3 py-2 rounded-sm border text-xs ${
-                message.testResult.passed
+                message.testResult.blocked
+                  ? 'border-ttd-amber/30 bg-[rgba(255,170,0,0.04)] text-ttd-amber'
+                  : message.testResult.passed
                   ? 'border-ttd-green/30 bg-[rgba(0,255,136,0.04)] text-ttd-green'
                   : 'border-ttd-red/30 bg-[rgba(255,68,68,0.04)] text-ttd-red'
               }`}>
-                {message.testResult.passed ? (
+                {message.testResult.passed && !message.testResult.blocked ? (
                   <CheckCircle size={13} className="mt-0.5 flex-shrink-0" />
                 ) : (
                   <XCircle size={13} className="mt-0.5 flex-shrink-0" />
@@ -512,7 +514,7 @@ function MessageBubble({ message, onContinue }: { message: Message; onContinue?:
                 <div>
                   <div className="font-semibold mb-0.5 flex items-center gap-1.5">
                     <Terminal size={10} />
-                    {message.testResult.passed ? 'TESTS PASSED' : 'TESTS FAILED'}
+                    {message.testResult.blocked ? 'TESTS BLOCKED' : message.testResult.passed ? 'TESTS PASSED' : 'TESTS FAILED'}
                   </div>
                   <div className="text-[11px] opacity-80 font-mono">{message.testResult.output}</div>
                 </div>

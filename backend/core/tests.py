@@ -503,7 +503,7 @@ class ApiSmokeTests(TestCase):
         with zipfile.ZipFile(BytesIO(b"".join(archive.streaming_content))) as zipped:
             self.assertEqual(zipped.namelist(), ["app.py"])
 
-    def test_model_file_artifact_parser_writes_workspace_file(self) -> None:
+    def test_model_file_artifact_parser_stages_workspace_file(self) -> None:
         generated_dir = tempfile.TemporaryDirectory()
         self.addCleanup(generated_dir.cleanup)
         chat = Chat.objects.create(title="model file")
@@ -516,15 +516,27 @@ print('hi')
 
         with override_settings(TTD_GENERATED_DIR=Path(generated_dir.name)):
             artifacts, passed, output, cleaned = create_model_file_artifacts("создай файл app.py", response, str(chat.id))
+            tree = self.client.get(f"/api/workspaces/{chat.id}")
+            pending = self.client.get(f"/api/workspaces/{chat.id}/pending/file?path=src/app.py")
+            apply = self.client.post(
+                f"/api/workspaces/{chat.id}/pending/apply",
+                data=json.dumps({"path": "src/app.py"}),
+                content_type="application/json",
+            )
 
         self.assertEqual(len(artifacts), 1)
         self.assertEqual(artifacts[0].name, "src/app.py")
         self.assertEqual(artifacts[0].content, "print('hi')")
-        self.assertTrue(Path(artifacts[0].disk_path).is_file())
         self.assertTrue(passed)
         self.assertIn("py_compile", output)
-        self.assertIn("Создал файл", cleaned)
+        self.assertIn("Подготовил файл", cleaned)
         self.assertNotIn("ttd-file", cleaned)
+        self.assertEqual(tree.json()["workspace"]["files"], [])
+        self.assertEqual(tree.json()["workspace"]["pendingChanges"][0]["path"], "src/app.py")
+        self.assertIn("+print('hi')", pending.json()["diff"]["diff"])
+        self.assertEqual(apply.status_code, 200)
+        self.assertEqual(apply.json()["file"]["content"], "print('hi')")
+        self.assertFalse(Path(artifacts[0].disk_path).exists())
 
     def test_model_file_artifact_parser_does_not_guess_without_protocol(self) -> None:
         generated_dir = tempfile.TemporaryDirectory()
@@ -554,6 +566,28 @@ print('hi')
 
         self.assertTrue(cleaned.endswith("```"))
         self.assertTrue(needs_continue)
+
+    def test_malware_like_generation_blocks_tests(self) -> None:
+        generated_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(generated_dir.cleanup)
+        chat = Chat.objects.create(title="safety")
+        response = """```ttd-file path="virus.py"
+print('demo only')
+```"""
+
+        with override_settings(TTD_GENERATED_DIR=Path(generated_dir.name)):
+            artifacts, passed, output, cleaned = create_model_file_artifacts("создай вирус на python", response, str(chat.id))
+            pending_test = self.client.post(
+                f"/api/workspaces/{chat.id}/pending/test",
+                data=json.dumps({"path": "virus.py"}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertFalse(passed)
+        self.assertIn("TESTS BLOCKED", output)
+        self.assertIn("Автотесты отключены", cleaned)
+        self.assertTrue(pending_test.json()["result"]["blocked"])
 
     def test_llamacpp_file_request_creates_generated_file(self) -> None:
         model_dir = tempfile.TemporaryDirectory()
@@ -593,7 +627,7 @@ print('hi')
         self.assertEqual(response.status_code, 200)
         self.assertIn("event: done", body)
         self.assertTrue(GeneratedFile.objects.filter(name="hello.py", content__contains="print('hello')").exists())
-        self.assertTrue(list((Path(generated_dir.name) / "workspaces").glob("*/hello.py")))
+        self.assertTrue(list((Path(generated_dir.name) / "workspaces").glob("*/.pending/hello.py")))
         sent_prompt = stream.call_args.args[0]
         self.assertNotIn("ttd-file", sent_prompt)
         self.assertIn("лучше файлами", sent_prompt)

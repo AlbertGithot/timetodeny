@@ -45,22 +45,30 @@ from .services import (
     postprocess_assistant_response,
     safe_filename,
     search_huggingface_models,
+    safety_blocked_test_output,
+    should_block_generated_test,
     stream_llamacpp,
     system_snapshot,
     test_generated_file,
+    test_generated_content,
     wants_file,
     wants_image,
 )
 from .utils import client_ip, json_response, log_admin_action, make_token, parse_json, require_admin, sse, user_agent
 from .workspaces import (
     cleanup_old_workspaces,
+    apply_pending_workspace_file,
     create_workspace_zip,
+    diff_pending_workspace_file,
     diff_workspace_file,
     directory_size,
     list_workspace_tree,
+    read_pending_workspace_file,
     read_workspace_file,
+    reject_pending_workspace_file,
     rollback_workspace_file,
     safe_workspace_path,
+    stage_workspace_file,
     write_workspace_file,
 )
 
@@ -1875,6 +1883,102 @@ def workspace_diff(request: HttpRequest, chat_id: UUID):
 
 
 @csrf_exempt
+def workspace_pending_file(request: HttpRequest, chat_id: UUID):
+    if not Chat.objects.filter(id=chat_id).exists():
+        return json_response({"ok": False, "error": "Chat not found"}, status=404)
+    if request.method == "GET":
+        path = request.GET.get("path") or ""
+        try:
+            return json_response(
+                {
+                    "ok": True,
+                    "file": read_pending_workspace_file(chat_id, path),
+                    "diff": diff_pending_workspace_file(chat_id, path),
+                }
+            )
+        except FileNotFoundError:
+            return json_response({"ok": False, "error": "Pending file not found"}, status=404)
+        except ValueError as exc:
+            return json_response({"ok": False, "error": str(exc)}, status=400)
+    if request.method == "POST":
+        data = parse_json(request)
+        relative_path = data.get("path") or ""
+        try:
+            stage_workspace_file(chat_id, relative_path, data.get("content") or "")
+            return json_response(
+                {
+                    "ok": True,
+                    "file": read_pending_workspace_file(chat_id, relative_path),
+                    "diff": diff_pending_workspace_file(chat_id, relative_path),
+                }
+            )
+        except ValueError as exc:
+            return json_response({"ok": False, "error": str(exc)}, status=400)
+    return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+
+
+@csrf_exempt
+def workspace_pending_apply(request: HttpRequest, chat_id: UUID):
+    if request.method != "POST":
+        return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+    if not Chat.objects.filter(id=chat_id).exists():
+        return json_response({"ok": False, "error": "Chat not found"}, status=404)
+    data = parse_json(request)
+    try:
+        return json_response({"ok": True, "file": apply_pending_workspace_file(chat_id, data.get("path") or "")})
+    except FileNotFoundError:
+        return json_response({"ok": False, "error": "Pending file not found"}, status=404)
+    except ValueError as exc:
+        return json_response({"ok": False, "error": str(exc)}, status=400)
+
+
+@csrf_exempt
+def workspace_pending_reject(request: HttpRequest, chat_id: UUID):
+    if request.method != "POST":
+        return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+    if not Chat.objects.filter(id=chat_id).exists():
+        return json_response({"ok": False, "error": "Chat not found"}, status=404)
+    data = parse_json(request)
+    try:
+        return json_response({"ok": True, "rejected": reject_pending_workspace_file(chat_id, data.get("path") or "")})
+    except FileNotFoundError:
+        return json_response({"ok": False, "error": "Pending file not found"}, status=404)
+    except ValueError as exc:
+        return json_response({"ok": False, "error": str(exc)}, status=400)
+
+
+@csrf_exempt
+def workspace_pending_test(request: HttpRequest, chat_id: UUID):
+    if request.method != "POST":
+        return json_response({"ok": False, "error": "Method not allowed"}, status=405)
+    if not Chat.objects.filter(id=chat_id).exists():
+        return json_response({"ok": False, "error": "Chat not found"}, status=404)
+    data = parse_json(request)
+    relative_path = data.get("path") or ""
+    try:
+        file = read_pending_workspace_file(chat_id, relative_path)
+        language = language_from_filename(relative_path)
+        if should_block_generated_test("", relative_path, file["content"]):
+            return json_response(
+                {
+                    "ok": True,
+                    "result": {
+                        "path": file["path"],
+                        "passed": False,
+                        "blocked": True,
+                        "output": safety_blocked_test_output(),
+                    },
+                }
+            )
+        passed, output = test_generated_content(file["content"], relative_path, language)
+        return json_response({"ok": True, "result": {"path": file["path"], "passed": passed, "blocked": False, "output": output}})
+    except FileNotFoundError:
+        return json_response({"ok": False, "error": "Pending file not found"}, status=404)
+    except ValueError as exc:
+        return json_response({"ok": False, "error": str(exc)}, status=400)
+
+
+@csrf_exempt
 def workspace_test(request: HttpRequest, chat_id: UUID):
     if request.method != "POST":
         return json_response({"ok": False, "error": "Method not allowed"}, status=405)
@@ -1884,9 +1988,21 @@ def workspace_test(request: HttpRequest, chat_id: UUID):
     relative_path = data.get("path") or ""
     try:
         file = read_workspace_file(chat_id, relative_path)
+        if should_block_generated_test("", relative_path, file["content"]):
+            return json_response(
+                {
+                    "ok": True,
+                    "result": {
+                        "path": file["path"],
+                        "passed": False,
+                        "blocked": True,
+                        "output": safety_blocked_test_output(),
+                    },
+                }
+            )
         disk_path = safe_workspace_path(chat_id, relative_path)
         passed, output = test_generated_file(disk_path, language_from_filename(relative_path))
-        return json_response({"ok": True, "result": {"path": file["path"], "passed": passed, "output": output}})
+        return json_response({"ok": True, "result": {"path": file["path"], "passed": passed, "blocked": False, "output": output}})
     except FileNotFoundError:
         return json_response({"ok": False, "error": "File not found"}, status=404)
     except ValueError as exc:

@@ -27,12 +27,22 @@ interface WorkspaceFile {
   updatedAt: number;
 }
 
+interface PendingChange {
+  path: string;
+  name: string;
+  type: 'pending';
+  size: number;
+  updatedAt: number;
+  changeType: 'create' | 'modify';
+}
+
 interface WorkspaceResponse {
   ok: boolean;
   workspace: {
     root: string;
     directories: string[];
     files: WorkspaceFile[];
+    pendingChanges: PendingChange[];
     fileCount: number;
   };
 }
@@ -57,11 +67,20 @@ interface DiffResponse {
   };
 }
 
+interface PendingFileResponse {
+  ok: boolean;
+  file: FileResponse['file'];
+  diff: DiffResponse['diff'] & {
+    changeType: 'create' | 'modify';
+  };
+}
+
 interface TestResponse {
   ok: boolean;
   result: {
     path: string;
     passed: boolean;
+    blocked?: boolean;
     output: string;
   };
 }
@@ -72,6 +91,7 @@ interface Props {
 }
 
 type ViewMode = 'code' | 'diff' | 'test';
+type SelectedKind = 'file' | 'pending';
 
 function sizeLabel(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
@@ -92,8 +112,10 @@ function languageLabel(path: string): string {
 
 export default function WorkspacePanel({ chatId, refreshKey }: Props) {
   const [files, setFiles] = useState<WorkspaceFile[]>([]);
+  const [pendingChanges, setPendingChanges] = useState<PendingChange[]>([]);
   const [collapsed, setCollapsed] = useState(false);
   const [selectedPath, setSelectedPath] = useState<string>('');
+  const [selectedKind, setSelectedKind] = useState<SelectedKind>('file');
   const [content, setContent] = useState('');
   const [originalContent, setOriginalContent] = useState('');
   const [diff, setDiff] = useState('');
@@ -105,9 +127,14 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
   const [loadedChatId, setLoadedChatId] = useState<string | null>(null);
 
   const selectedFile = useMemo(
-    () => files.find(file => file.path === selectedPath) || null,
-    [files, selectedPath]
+    () => selectedKind === 'file' ? files.find(file => file.path === selectedPath) || null : null,
+    [files, selectedKind, selectedPath]
   );
+  const selectedPending = useMemo(
+    () => selectedKind === 'pending' ? pendingChanges.find(file => file.path === selectedPath) || null : null,
+    [pendingChanges, selectedKind, selectedPath]
+  );
+  const selectedEntry = selectedFile || selectedPending;
   const dirty = content !== originalContent;
   const groupedFiles = useMemo(() => {
     const groups = new Map<string, WorkspaceFile[]>();
@@ -117,11 +144,21 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
     });
     return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
   }, [files]);
+  const groupedPending = useMemo(() => {
+    const groups = new Map<string, PendingChange[]>();
+    pendingChanges.forEach((file) => {
+      const dir = parentDir(file.path);
+      groups.set(dir, [...(groups.get(dir) || []), file]);
+    });
+    return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [pendingChanges]);
 
   const loadWorkspace = () => {
     if (!chatId) {
       setFiles([]);
+      setPendingChanges([]);
       setSelectedPath('');
+      setSelectedKind('file');
       setContent('');
       setOriginalContent('');
       setDiff('');
@@ -133,14 +170,23 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
     getJson<WorkspaceResponse>(`/workspaces/${chatId}`)
       .then((payload) => {
         const sorted = [...payload.workspace.files].sort((a, b) => a.path.localeCompare(b.path));
+        const sortedPending = [...(payload.workspace.pendingChanges || [])].sort((a, b) => a.path.localeCompare(b.path));
         setLoadedChatId(chatId);
         setFiles(sorted);
-        const selectedStillExists = sorted.some(file => file.path === selectedPath);
-        if (!selectedStillExists && sorted.length > 0) {
+        setPendingChanges(sortedPending);
+        const selectedStillExists = selectedKind === 'pending'
+          ? sortedPending.some(file => file.path === selectedPath)
+          : sorted.some(file => file.path === selectedPath);
+        if (!selectedStillExists && sortedPending.length > 0) {
+          setSelectedKind('pending');
+          setSelectedPath(sortedPending[0].path);
+        } else if (!selectedStillExists && sorted.length > 0) {
+          setSelectedKind('file');
           setSelectedPath(sorted[0].path);
         }
-        if (sorted.length === 0) {
+        if (sorted.length === 0 && sortedPending.length === 0) {
           setSelectedPath('');
+          setSelectedKind('file');
           setContent('');
           setOriginalContent('');
           setDiff('');
@@ -181,20 +227,23 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
       setTestResult(null);
       return;
     }
-    getJson<FileResponse>(`/workspaces/${chatId}/file?path=${encodeURIComponent(selectedPath)}`)
+    const endpoint = selectedKind === 'pending'
+      ? `/workspaces/${chatId}/pending/file?path=${encodeURIComponent(selectedPath)}`
+      : `/workspaces/${chatId}/file?path=${encodeURIComponent(selectedPath)}`;
+    getJson<FileResponse | PendingFileResponse>(endpoint)
       .then((payload) => {
         setContent(payload.file.content);
         setOriginalContent(payload.file.content);
-        setDiff('');
+        setDiff('diff' in payload ? payload.diff.diff : '');
         setTestResult(null);
-        setViewMode('code');
+        setViewMode('diff' in payload ? 'diff' : 'code');
       })
       .catch((error: Error) => {
         setContent('');
         setOriginalContent('');
         toast.error(error.message);
       });
-  }, [chatId, selectedPath]);
+  }, [chatId, selectedKind, selectedPath]);
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(viewMode === 'diff' ? diff : content);
@@ -210,12 +259,20 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
     if (!chatId || !selectedPath) return false;
     setSaving(true);
     try {
-      const payload = await postJson<FileResponse>(`/workspaces/${chatId}/file`, { path: selectedPath, content });
+      const endpoint = selectedKind === 'pending'
+        ? `/workspaces/${chatId}/pending/file`
+        : `/workspaces/${chatId}/file`;
+      const payload = await postJson<FileResponse | PendingFileResponse>(endpoint, { path: selectedPath, content });
       setContent(payload.file.content);
       setOriginalContent(payload.file.content);
-      setViewMode('code');
+      if ('diff' in payload) {
+        setDiff(payload.diff.diff);
+        setViewMode('diff');
+      } else {
+        setViewMode('code');
+      }
       loadWorkspace();
-      toast.success(`Saved ${selectedPath}`);
+      toast.success(`${selectedKind === 'pending' ? 'Updated pending change' : 'Saved'} ${selectedPath}`);
       return true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Save failed');
@@ -232,8 +289,13 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
   const handleDiff = async () => {
     if (!chatId || !selectedPath) return;
     try {
-      const payload = await getJson<DiffResponse>(`/workspaces/${chatId}/diff?path=${encodeURIComponent(selectedPath)}`);
-      setDiff(payload.diff.hasPrevious ? payload.diff.diff : 'No previous version for this file.');
+      if (selectedKind === 'pending') {
+        const payload = await getJson<PendingFileResponse>(`/workspaces/${chatId}/pending/file?path=${encodeURIComponent(selectedPath)}`);
+        setDiff(payload.diff.diff || 'Pending file has no diff content.');
+      } else {
+        const payload = await getJson<DiffResponse>(`/workspaces/${chatId}/diff?path=${encodeURIComponent(selectedPath)}`);
+        setDiff(payload.diff.hasPrevious ? payload.diff.diff : 'No previous version for this file.');
+      }
       setViewMode('diff');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Diff failed');
@@ -248,10 +310,15 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
     }
     setTesting(true);
     try {
-      const payload = await postJson<TestResponse>(`/workspaces/${chatId}/test`, { path: selectedPath });
+      const endpoint = selectedKind === 'pending'
+        ? `/workspaces/${chatId}/pending/test`
+        : `/workspaces/${chatId}/test`;
+      const payload = await postJson<TestResponse>(endpoint, { path: selectedPath });
       setTestResult(payload.result);
       setViewMode('test');
-      if (payload.result.passed) {
+      if (payload.result.blocked) {
+        toast.error('Tests blocked by safety policy');
+      } else if (payload.result.passed) {
         toast.success('Tests passed');
       } else {
         toast.error('Tests failed');
@@ -279,7 +346,42 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
     }
   };
 
-  if (!chatId || loadedChatId !== chatId || files.length === 0) {
+  const handleApplyPending = async () => {
+    if (!chatId || !selectedPath || selectedKind !== 'pending') return;
+    try {
+      const payload = await postJson<FileResponse>(`/workspaces/${chatId}/pending/apply`, { path: selectedPath });
+      setSelectedKind('file');
+      setSelectedPath(payload.file.path);
+      setContent(payload.file.content);
+      setOriginalContent(payload.file.content);
+      setDiff('');
+      setTestResult(null);
+      setViewMode('code');
+      loadWorkspace();
+      toast.success(`Applied ${payload.file.path}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Apply failed');
+    }
+  };
+
+  const handleRejectPending = async () => {
+    if (!chatId || !selectedPath || selectedKind !== 'pending') return;
+    try {
+      await postJson(`/workspaces/${chatId}/pending/reject`, { path: selectedPath });
+      setSelectedPath('');
+      setSelectedKind('file');
+      setContent('');
+      setOriginalContent('');
+      setDiff('');
+      setTestResult(null);
+      loadWorkspace();
+      toast('Pending change rejected');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Reject failed');
+    }
+  };
+
+  if (!chatId || loadedChatId !== chatId || (files.length === 0 && pendingChanges.length === 0)) {
     return null;
   }
 
@@ -300,7 +402,7 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
         >
           FILES
         </div>
-        <div className="mt-auto text-[10px] text-ttd-green font-mono">{files.length}</div>
+        <div className="mt-auto text-[10px] text-ttd-green font-mono">{files.length + pendingChanges.length}</div>
       </aside>
     );
   }
@@ -311,6 +413,7 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
         <FileCode size={13} className="text-ttd-cyan" />
         <span className="text-xs font-bold tracking-wider text-ttd-text">FILES</span>
         <span className="text-[10px] text-ttd-muted">{files.length} files</span>
+        {pendingChanges.length > 0 && <span className="text-[10px] text-ttd-amber">{pendingChanges.length} pending</span>}
         {dirty && <span className="text-[10px] text-ttd-amber">unsaved</span>}
         <button onClick={() => setPanelCollapsed(true)} className="ml-auto w-7 h-7 flex items-center justify-center rounded-sm hover:bg-ttd-elevated" title="Hide Files panel">
           <PanelRightClose size={12} className="text-ttd-muted" />
@@ -325,6 +428,32 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
 
       <div className="flex min-h-0 flex-1">
         <div className="w-[180px] flex-shrink-0 border-r border-ttd-border overflow-auto bg-ttd-bg/40">
+          {groupedPending.map(([dir, items]) => (
+            <div key={`pending-${dir}`} className="border-b border-ttd-amber/20">
+              <div className="px-3 py-2 flex items-center gap-1.5 text-[10px] text-ttd-amber bg-ttd-amber/5">
+                <GitCompare size={10} className="text-ttd-amber" />
+                <span className="truncate" title={dir}>PENDING · {dir}</span>
+              </div>
+              {items.map((file) => (
+                <button
+                  key={`pending-${file.path}`}
+                  onClick={() => {
+                    setSelectedKind('pending');
+                    setSelectedPath(file.path);
+                  }}
+                  className={`w-full px-3 py-2 text-left hover:bg-ttd-elevated transition-colors ${
+                    selectedKind === 'pending' && file.path === selectedPath ? 'bg-ttd-elevated border-l border-ttd-amber' : 'border-l border-transparent'
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5">
+                    <FileCode size={10} className="text-ttd-amber flex-shrink-0" />
+                    <span className="text-[11px] text-ttd-text truncate" title={file.path}>{file.name}</span>
+                  </div>
+                  <div className="mt-0.5 text-[9px] text-ttd-dim">{file.changeType.toUpperCase()} · {sizeLabel(file.size)}</div>
+                </button>
+              ))}
+            </div>
+          ))}
           {groupedFiles.map(([dir, items]) => (
             <div key={dir} className="border-b border-ttd-border/40">
               <div className="px-3 py-2 flex items-center gap-1.5 text-[10px] text-ttd-muted bg-ttd-surface/50">
@@ -334,9 +463,12 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
               {items.map((file) => (
                 <button
                   key={file.path}
-                  onClick={() => setSelectedPath(file.path)}
+                  onClick={() => {
+                    setSelectedKind('file');
+                    setSelectedPath(file.path);
+                  }}
                   className={`w-full px-3 py-2 text-left hover:bg-ttd-elevated transition-colors ${
-                    file.path === selectedPath ? 'bg-ttd-elevated border-l border-ttd-cyan' : 'border-l border-transparent'
+                    selectedKind === 'file' && file.path === selectedPath ? 'bg-ttd-elevated border-l border-ttd-cyan' : 'border-l border-transparent'
                   }`}
                 >
                   <div className="flex items-center gap-1.5">
@@ -355,14 +487,16 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
             <div className="min-w-0 flex-1">
               <div className="text-xs text-ttd-text truncate" title={selectedPath}>{selectedPath}</div>
               <div className="text-[10px] text-ttd-muted">
-                {selectedFile ? `${languageLabel(selectedPath)} · ${sizeLabel(selectedFile.size)}` : 'No file selected'}
+                {selectedEntry
+                  ? `${selectedKind === 'pending' ? 'PENDING · ' : ''}${languageLabel(selectedPath)} · ${sizeLabel(selectedEntry.size)}`
+                  : 'No file selected'}
               </div>
             </div>
-            <button onClick={handleCopy} disabled={!selectedFile} className="ttd-btn ttd-btn-ghost text-[10px] px-2 py-1 flex items-center gap-1 disabled:opacity-40" title="Copy current view">
+            <button onClick={handleCopy} disabled={!selectedEntry} className="ttd-btn ttd-btn-ghost text-[10px] px-2 py-1 flex items-center gap-1 disabled:opacity-40" title="Copy current view">
               <Copy size={10} />
               COPY
             </button>
-            <button onClick={handleSave} disabled={!selectedFile || !dirty || saving} className="ttd-btn ttd-btn-cyan text-[10px] px-2 py-1 flex items-center gap-1 disabled:opacity-40" title="Save edited file">
+            <button onClick={handleSave} disabled={!selectedEntry || !dirty || saving} className="ttd-btn ttd-btn-cyan text-[10px] px-2 py-1 flex items-center gap-1 disabled:opacity-40" title="Save edited file">
               <Save size={10} />
               {saving ? 'SAVING' : 'SAVE'}
             </button>
@@ -380,15 +514,27 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
                 {mode}
               </button>
             ))}
-            <button onClick={handleDiff} disabled={!selectedFile} className="ttd-btn ttd-btn-ghost text-[10px] px-2 py-1 flex items-center gap-1 ml-auto disabled:opacity-40">
+            {selectedKind === 'pending' && (
+              <>
+                <button onClick={handleApplyPending} disabled={!selectedPending} className="ttd-btn ttd-btn-green text-[10px] px-2 py-1 flex items-center gap-1 ml-auto disabled:opacity-40">
+                  <CheckCircle size={10} />
+                  APPLY
+                </button>
+                <button onClick={handleRejectPending} disabled={!selectedPending} className="ttd-btn ttd-btn-red text-[10px] px-2 py-1 flex items-center gap-1 disabled:opacity-40">
+                  <XCircle size={10} />
+                  REJECT
+                </button>
+              </>
+            )}
+            <button onClick={handleDiff} disabled={!selectedEntry} className={`ttd-btn ttd-btn-ghost text-[10px] px-2 py-1 flex items-center gap-1 disabled:opacity-40 ${selectedKind === 'file' ? 'ml-auto' : ''}`}>
               <GitCompare size={10} />
               DIFF
             </button>
-            <button onClick={handleRunTest} disabled={!selectedFile || testing} className="ttd-btn ttd-btn-green text-[10px] px-2 py-1 flex items-center gap-1 disabled:opacity-40">
+            <button onClick={handleRunTest} disabled={!selectedEntry || testing} className="ttd-btn ttd-btn-green text-[10px] px-2 py-1 flex items-center gap-1 disabled:opacity-40">
               <Play size={10} />
               {testing ? 'RUNNING' : 'RUN'}
             </button>
-            <button onClick={handleRollback} disabled={!selectedFile} className="ttd-btn ttd-btn-ghost text-[10px] px-2 py-1 flex items-center gap-1 disabled:opacity-40">
+            <button onClick={handleRollback} disabled={!selectedFile || selectedKind === 'pending'} className="ttd-btn ttd-btn-ghost text-[10px] px-2 py-1 flex items-center gap-1 disabled:opacity-40">
               <RotateCcw size={10} />
               UNDO
             </button>
@@ -412,11 +558,13 @@ export default function WorkspacePanel({ chatId, refreshKey }: Props) {
               <div className="h-full overflow-auto p-4">
                 {testResult ? (
                   <div className={`border rounded-sm p-3 text-xs ${
-                    testResult.passed ? 'border-ttd-green/35 text-ttd-green bg-ttd-green/5' : 'border-ttd-red/35 text-ttd-red bg-ttd-red/5'
+                    testResult.blocked
+                      ? 'border-ttd-amber/35 text-ttd-amber bg-ttd-amber/5'
+                      : testResult.passed ? 'border-ttd-green/35 text-ttd-green bg-ttd-green/5' : 'border-ttd-red/35 text-ttd-red bg-ttd-red/5'
                   }`}>
                     <div className="flex items-center gap-2 font-semibold mb-2">
-                      {testResult.passed ? <CheckCircle size={13} /> : <XCircle size={13} />}
-                      {testResult.passed ? 'TESTS PASSED' : 'TESTS FAILED'}
+                      {testResult.blocked ? <XCircle size={13} /> : testResult.passed ? <CheckCircle size={13} /> : <XCircle size={13} />}
+                      {testResult.blocked ? 'TESTS BLOCKED' : testResult.passed ? 'TESTS PASSED' : 'TESTS FAILED'}
                     </div>
                     <pre className="text-[11px] whitespace-pre-wrap opacity-85">{testResult.output}</pre>
                   </div>

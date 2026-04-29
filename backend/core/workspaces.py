@@ -14,6 +14,7 @@ IGNORED_DIR_NAMES = {
     ".git",
     ".mypy_cache",
     ".next",
+    ".pending",
     ".pytest_cache",
     ".ruff_cache",
     ".versions",
@@ -32,6 +33,12 @@ def workspace_root(chat_id: str | UUID) -> Path:
 
 def workspace_versions_root(chat_id: str | UUID) -> Path:
     root = workspace_root(chat_id) / ".versions"
+    root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
+
+
+def workspace_pending_root(chat_id: str | UUID) -> Path:
+    root = workspace_root(chat_id) / ".pending"
     root.mkdir(parents=True, exist_ok=True)
     return root.resolve()
 
@@ -91,8 +98,45 @@ def write_workspace_file(chat_id: str | UUID, relative_path: str, content: str) 
     return path
 
 
+def safe_pending_path(chat_id: str | UUID, relative_path: str) -> Path:
+    root = workspace_pending_root(chat_id)
+    rel = safe_relative_path(relative_path)
+    if is_ignored_workspace_path(rel):
+        raise ValueError("workspace internals are not exposed")
+    path = (root / rel).resolve()
+    if path != root and root not in path.parents:
+        raise ValueError("unsafe path")
+    return path
+
+
+def stage_workspace_file(chat_id: str | UUID, relative_path: str, content: str) -> Path:
+    encoded = content.encode("utf-8")
+    if settings.TTD_WORKSPACE_MAX_FILE_BYTES > 0 and len(encoded) > settings.TTD_WORKSPACE_MAX_FILE_BYTES:
+        raise ValueError(f"file is too large ({len(encoded)} bytes)")
+    path = safe_pending_path(chat_id, relative_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
 def read_workspace_file(chat_id: str | UUID, relative_path: str) -> dict:
     path = safe_workspace_path(chat_id, relative_path)
+    if not path.is_file():
+        raise FileNotFoundError(relative_path)
+    size = path.stat().st_size
+    if settings.TTD_WORKSPACE_MAX_FILE_BYTES > 0 and size > settings.TTD_WORKSPACE_MAX_FILE_BYTES:
+        raise ValueError("file is too large to preview")
+    return {
+        "path": str(safe_relative_path(relative_path)),
+        "name": path.name,
+        "size": size,
+        "content": path.read_text(encoding="utf-8", errors="replace"),
+        "updatedAt": int(path.stat().st_mtime),
+    }
+
+
+def read_pending_workspace_file(chat_id: str | UUID, relative_path: str) -> dict:
+    path = safe_pending_path(chat_id, relative_path)
     if not path.is_file():
         raise FileNotFoundError(relative_path)
     size = path.stat().st_size
@@ -134,6 +178,7 @@ def list_workspace_tree(chat_id: str | UUID) -> dict:
         "root": str(root),
         "directories": sorted(dirs),
         "files": files,
+        "pendingChanges": list_pending_changes(chat_id),
         "fileCount": len(files),
     }
 
@@ -163,6 +208,86 @@ def diff_workspace_file(chat_id: str | UUID, relative_path: str) -> dict:
         )
     )
     return {"path": str(safe_relative_path(relative_path)), "hasPrevious": True, "diff": diff}
+
+
+def list_pending_changes(chat_id: str | UUID) -> list[dict]:
+    root = workspace_pending_root(chat_id)
+    changes = []
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root)
+        if is_ignored_workspace_path(rel) or path.is_dir():
+            continue
+        active = safe_workspace_path(chat_id, rel.as_posix())
+        changes.append(
+            {
+                "path": rel.as_posix(),
+                "name": path.name,
+                "type": "pending",
+                "size": path.stat().st_size,
+                "updatedAt": int(path.stat().st_mtime),
+                "changeType": "modify" if active.is_file() else "create",
+            }
+        )
+    return changes
+
+
+def diff_pending_workspace_file(chat_id: str | UUID, relative_path: str) -> dict:
+    pending = safe_pending_path(chat_id, relative_path)
+    if not pending.is_file():
+        raise FileNotFoundError(relative_path)
+    current = safe_workspace_path(chat_id, relative_path)
+    old = current.read_text(encoding="utf-8", errors="replace").splitlines() if current.is_file() else []
+    new = pending.read_text(encoding="utf-8", errors="replace").splitlines()
+    diff = "\n".join(
+        difflib.unified_diff(
+            old,
+            new,
+            fromfile=f"{relative_path}@current",
+            tofile=f"{relative_path}@pending",
+            lineterm="",
+        )
+    )
+    return {
+        "path": str(safe_relative_path(relative_path)),
+        "hasPrevious": current.is_file(),
+        "changeType": "modify" if current.is_file() else "create",
+        "diff": diff,
+    }
+
+
+def _cleanup_empty_pending_dirs(chat_id: str | UUID, start: Path) -> None:
+    root = workspace_pending_root(chat_id)
+    parent = start.parent
+    while parent != root and root in parent.parents:
+        try:
+            parent.rmdir()
+        except OSError:
+            break
+        parent = parent.parent
+
+
+def apply_pending_workspace_file(chat_id: str | UUID, relative_path: str) -> dict:
+    pending = safe_pending_path(chat_id, relative_path)
+    if not pending.is_file():
+        raise FileNotFoundError(relative_path)
+    content = pending.read_text(encoding="utf-8", errors="replace")
+    write_workspace_file(chat_id, relative_path, content)
+    pending.unlink()
+    _cleanup_empty_pending_dirs(chat_id, pending)
+    return read_workspace_file(chat_id, relative_path)
+
+
+def reject_pending_workspace_file(chat_id: str | UUID, relative_path: str) -> dict:
+    pending = safe_pending_path(chat_id, relative_path)
+    if not pending.is_file():
+        raise FileNotFoundError(relative_path)
+    info = {
+        "path": str(safe_relative_path(relative_path)),
+        "name": pending.name,
+    }
+    pending.unlink()
+    _cleanup_empty_pending_dirs(chat_id, pending)
+    return info
 
 
 def rollback_workspace_file(chat_id: str | UUID, relative_path: str) -> dict:
