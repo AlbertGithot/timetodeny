@@ -40,6 +40,8 @@ export interface Message {
     phase: string;
     activity: string;
     progress: number;
+    etaSeconds?: number;
+    etaLabel?: string;
   };
   thinkingVisible?: boolean;
   thinking?: string;
@@ -268,6 +270,8 @@ export default function ChatInterfaceClient() {
               phase: String(status.phase || 'working'),
               activity: String(status.activity || 'Модель работает над вашим запросом...'),
               progress: Number(status.progress || 0),
+              etaSeconds: Number(status.etaSeconds || 0),
+              etaLabel: String(status.etaLabel || ''),
             };
             publishGeneration(generation);
             setMessages(prev => prev.map(m =>

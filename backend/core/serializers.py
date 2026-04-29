@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from django.db.models import Count
+from django.utils import timezone
 
 from .models import AdminSession, Chat, GeneratedFile, Message, ModelInstallJob, ModelRegistry, RequestLog
 from .utils import now_label, time_label
@@ -16,6 +17,62 @@ def generated_file_to_dict(file: GeneratedFile) -> dict:
     }
 
 
+def bytes_label(value: int | float | None) -> str:
+    amount = float(value or 0)
+    if amount <= 0:
+        return "-"
+    gb = amount / (1024**3)
+    if gb >= 1:
+        return f"{gb:.2f}GB"
+    mb = amount / (1024**2)
+    if mb >= 1:
+        return f"{mb:.1f}MB"
+    kb = amount / 1024
+    if kb >= 1:
+        return f"{kb:.1f}KB"
+    return f"{int(amount)}B"
+
+
+def eta_label(seconds: int | float | None) -> str:
+    value = int(seconds or 0)
+    if value <= 0:
+        return "-"
+    minutes, sec = divmod(value, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {sec}s"
+    return f"{sec}s"
+
+
+def generation_eta(message: Message, generation: dict) -> tuple[int, str]:
+    if generation.get("status") != "streaming":
+        return 0, "-"
+    try:
+        progress = int(generation.get("progress") or 0)
+    except (TypeError, ValueError):
+        progress = 0
+    if progress <= 2 or progress >= 99:
+        return 0, "calculating"
+    elapsed = max(1, int((timezone.now() - message.created_at).total_seconds()))
+    remaining = int(elapsed * ((100 - progress) / max(1, progress)))
+    remaining = max(1, min(remaining, 24 * 60 * 60))
+    return remaining, eta_label(remaining)
+
+
+def generation_to_dict(message: Message, generation: dict) -> dict:
+    eta_seconds, eta_text = generation_eta(message, generation)
+    return {
+        "status": generation.get("status") or "streaming",
+        "phase": generation.get("phase") or "working",
+        "activity": generation.get("activity") or "Модель работает над вашим запросом...",
+        "progress": int(generation.get("progress") or 0),
+        "etaSeconds": eta_seconds,
+        "etaLabel": eta_text,
+    }
+
+
 def message_to_dict(message: Message) -> dict:
     payload = {
         "id": str(message.id),
@@ -27,12 +84,7 @@ def message_to_dict(message: Message) -> dict:
     if isinstance(message.metadata, dict) and message.metadata.get("needsContinuation"):
         payload["needsContinuation"] = True
     if isinstance(generation, dict):
-        payload["generation"] = {
-            "status": generation.get("status") or "streaming",
-            "phase": generation.get("phase") or "working",
-            "activity": generation.get("activity") or "Модель работает над вашим запросом...",
-            "progress": int(generation.get("progress") or 0),
-        }
+        payload["generation"] = generation_to_dict(message, generation)
         if generation.get("status") == "streaming":
             payload["streaming"] = True
     if message.thinking:
@@ -119,35 +171,6 @@ def model_to_dict(model: ModelRegistry) -> dict:
             "maxTestFiles": model.max_test_files,
         },
     }
-
-
-def bytes_label(value: int | float | None) -> str:
-    amount = float(value or 0)
-    if amount <= 0:
-        return "-"
-    gb = amount / (1024**3)
-    if gb >= 1:
-        return f"{gb:.2f}GB"
-    mb = amount / (1024**2)
-    if mb >= 1:
-        return f"{mb:.1f}MB"
-    kb = amount / 1024
-    if kb >= 1:
-        return f"{kb:.1f}KB"
-    return f"{int(amount)}B"
-
-
-def eta_label(seconds: int | float | None) -> str:
-    value = int(seconds or 0)
-    if value <= 0:
-        return "-"
-    minutes, sec = divmod(value, 60)
-    hours, minutes = divmod(minutes, 60)
-    if hours:
-        return f"{hours}h {minutes}m"
-    if minutes:
-        return f"{minutes}m {sec}s"
-    return f"{sec}s"
 
 
 def install_job_to_dict(job: ModelInstallJob) -> dict:

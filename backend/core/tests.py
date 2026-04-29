@@ -379,6 +379,34 @@ class ApiSmokeTests(TestCase):
         self.assertEqual(chosen, coder)
         self.assertTrue(text.selected)
 
+    def test_instant_auto_selection_prefers_fast_model_over_selected_heavy_model(self) -> None:
+        from core.views import choose_response_model
+
+        ModelRegistry.objects.create(
+            name="heavy-selected",
+            status="ready",
+            model_type="text",
+            selected=True,
+            quantization="Q8_0",
+            size="18.0GB",
+            instant_context_messages=12,
+            instant_max_tokens=4096,
+        )
+        fast = ModelRegistry.objects.create(
+            name="fast-q4",
+            status="ready",
+            model_type="text",
+            selected=False,
+            quantization="Q4_K_S",
+            size="3.2GB",
+            instant_context_messages=3,
+            instant_max_tokens=512,
+        )
+
+        chosen = choose_response_model("__auto__", "instant", "коротко объясни nginx")
+
+        self.assertEqual(chosen, fast)
+
     def test_root_serves_exported_frontend(self) -> None:
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)

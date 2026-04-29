@@ -4,6 +4,7 @@ import csv
 import html as html_lib
 import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -31,6 +32,7 @@ from .serializers import (
     chat_queryset,
     chat_to_detail,
     chat_to_summary,
+    generation_to_dict,
     install_job_to_dict,
     message_to_dict,
     model_to_dict,
@@ -525,6 +527,55 @@ def model_supports_mode(model: ModelRegistry, mode: str) -> bool:
     return model.use_for_instant
 
 
+def model_size_gb(model: ModelRegistry) -> float:
+    if model.local_path:
+        try:
+            return Path(model.local_path).stat().st_size / (1024**3)
+        except OSError:
+            pass
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*(GB|MB)", model.size or "", re.IGNORECASE)
+    if not match:
+        return 0
+    value = float(match.group(1))
+    return value if match.group(2).upper() == "GB" else value / 1024
+
+
+def quant_speed_score(model: ModelRegistry) -> int:
+    quant = (model.quantization or "").upper()
+    if "Q2" in quant:
+        return 90
+    if "Q3" in quant:
+        return 80
+    if "Q4_K_S" in quant:
+        return 70
+    if "Q4" in quant:
+        return 58
+    if "Q5" in quant:
+        return 30
+    if "Q6" in quant:
+        return 15
+    if "Q8" in quant or "F16" in quant:
+        return -20
+    return 20
+
+
+def size_speed_score(model: ModelRegistry) -> int:
+    size = model_size_gb(model)
+    if size <= 0:
+        return 0
+    if size <= 3:
+        return 55
+    if size <= 5:
+        return 40
+    if size <= 8:
+        return 22
+    if size <= 12:
+        return 5
+    if size <= 20:
+        return -35
+    return -75
+
+
 def choose_response_model(requested_name: str, mode: str, prompt: str) -> ModelRegistry | None:
     candidates = list(
         ModelRegistry.objects.filter(status="ready", hidden=False, model_type__in=["text", "code"])
@@ -548,14 +599,23 @@ def choose_response_model(requested_name: str, mode: str, prompt: str) -> ModelR
     def score(model: ModelRegistry) -> tuple[int, str]:
         value = 0
         if model.selected:
-            value += 50
+            value += 28 if mode == "instant" else 50
         if code_task and model.model_type == "code":
             value += 80
         if not code_task and model.model_type == "text":
             value += 20
-        if mode == "instant" and model.quantization.upper() in {"Q2_K", "Q3_K_M", "Q4_K_S", "Q4_K_M"}:
-            value += 10
-        if mode == "expert" and model.quantization.upper() in {"Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"}:
+        if mode == "instant":
+            value += quant_speed_score(model)
+            value += size_speed_score(model)
+            if model.instant_context_messages <= 4:
+                value += 16
+            elif model.instant_context_messages > 8:
+                value -= 20
+            if 0 < model.instant_max_tokens <= 512:
+                value += 18
+            elif model.instant_max_tokens > 2048:
+                value -= 28
+        if mode == "expert" and model.quantization.upper() in {"Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0", "F16"}:
             value += 8
         return value, model.name
 
@@ -632,12 +692,10 @@ def activity_for_stream(content: str, token_count: int, mode: str) -> tuple[str,
 
 def status_event_payload(message: Message) -> dict:
     generation = message.metadata.get("generation", {}) if isinstance(message.metadata, dict) else {}
+    payload = generation_to_dict(message, generation)
     return {
         "messageId": str(message.id),
-        "status": generation.get("status") or "streaming",
-        "phase": generation.get("phase") or "working",
-        "activity": generation.get("activity") or "Модель работает над вашим запросом...",
-        "progress": int(generation.get("progress") or 0),
+        **payload,
     }
 
 
