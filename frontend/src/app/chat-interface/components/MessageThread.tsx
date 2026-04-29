@@ -405,25 +405,25 @@ function MessageBubble({ message, onContinue }: { message: Message; onContinue?:
   return (
     <div className="px-4 py-3 animate-fade-in">
       <div className="max-w-4xl w-full">
-        <div className="flex items-center gap-2 mb-1">
-          <span className="text-[10px] text-ttd-green font-semibold tracking-wider">TTD</span>
-          <span className="text-[10px] text-ttd-muted">{message.ts}</span>
+        <div className="flex items-center gap-2 mb-1 h-4 min-h-4 overflow-hidden whitespace-nowrap">
+          <span className="text-[10px] text-ttd-green font-semibold tracking-wider flex-shrink-0 leading-4">TTD</span>
+          <span className="text-[10px] text-ttd-muted flex-shrink-0 leading-4">{message.ts}</span>
           {message.tokensPerSec && (
-            <span className="text-[10px] text-ttd-dim">
+            <span className="text-[10px] text-ttd-dim flex-shrink-0 leading-4">
               {message.tokensPerSec} tok/s · {message.totalTokens} tokens
             </span>
           )}
           {message.streaming && (
-            <div className="flex items-center gap-1.5 ml-1 min-w-0">
-              <span className="text-[10px] text-ttd-green animate-pulse">{message.generation?.phase || 'streaming'}</span>
-              <span className="text-[10px] text-ttd-dim">·</span>
-              <span className="text-[10px] text-ttd-cyan font-mono whitespace-nowrap">
-                ETA {streamingEta}
+            <div className="flex items-center gap-1.5 ml-1 min-w-0 overflow-hidden leading-4">
+              <span className="text-[10px] text-ttd-green animate-pulse flex-shrink-0 leading-4">{message.generation?.phase || 'streaming'}</span>
+              <span className="text-[10px] text-ttd-dim flex-shrink-0 leading-4">·</span>
+              <span className="text-[10px] text-ttd-cyan font-mono flex-shrink-0 leading-4 max-w-28 overflow-hidden text-ellipsis">
+                ETA&nbsp;{streamingEta}
               </span>
               {message.generation?.activity && (
                 <>
-                  <span className="text-[10px] text-ttd-dim">·</span>
-                  <span className="text-[10px] text-ttd-muted truncate max-w-[360px]">
+                  <span className="text-[10px] text-ttd-dim flex-shrink-0 leading-4">·</span>
+                  <span className="text-[10px] text-ttd-muted min-w-0 overflow-hidden text-ellipsis leading-4">
                     {message.generation.activity}
                   </span>
                 </>
