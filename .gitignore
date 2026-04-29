@@ -1,6 +1,7 @@
 # Node modules
 node_modules/
 package-lock.json
+.runtime/
 
 # Next.js build output
 .next/
@@ -44,3 +45,5 @@ venv/
 backend/db.sqlite3
 backend/media/
 backend/models/
+models/
+llamaserver/

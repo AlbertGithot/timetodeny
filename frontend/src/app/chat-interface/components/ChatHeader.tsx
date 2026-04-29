@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Zap, Brain, ChevronDown, Plus, Shield } from 'lucide-react';
+import { Zap, Brain, ChevronDown, Plus, Shield, Activity } from 'lucide-react';
 import type { Mode } from './ChatInterfaceClient';
 import { getJson } from '@/lib/api';
 
@@ -17,6 +17,9 @@ interface AvailableModel {
   vram: string;
   status: string;
   selected?: boolean;
+  autoSelect?: boolean;
+  useForInstant?: boolean;
+  useForExpert?: boolean;
 }
 
 interface ModelsResponse {
@@ -29,7 +32,22 @@ interface ModelsResponse {
     status: string;
     selected: boolean;
     hidden: boolean;
+    performance?: {
+      autoSelect?: boolean;
+      useForInstant?: boolean;
+      useForExpert?: boolean;
+    };
   }>;
+}
+
+interface RuntimeResponse {
+  ok: boolean;
+  runtime: {
+    state: 'ready' | 'loading' | 'offline' | 'error';
+    label: string;
+    selectedModel?: string | null;
+    health?: string | null;
+  };
 }
 
 interface Props {
@@ -46,6 +64,7 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
   const router = useRouter();
   const [modelDropOpen, setModelDropOpen] = useState(false);
   const [models, setModels] = useState<AvailableModel[]>([]);
+  const [runtime, setRuntime] = useState<RuntimeResponse['runtime'] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -53,7 +72,7 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
       .then((payload) => {
         if (cancelled) return;
         const visible = payload.models
-          .filter(model => !model.hidden)
+          .filter(model => !model.hidden && model.status === 'ready')
           .map(model => ({
             id: model.id,
             name: model.name,
@@ -61,16 +80,60 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
             vram: model.vram,
             status: model.status,
             selected: model.selected,
+            autoSelect: model.performance?.autoSelect ?? true,
+            useForInstant: model.performance?.useForInstant ?? true,
+            useForExpert: model.performance?.useForExpert ?? true,
           }));
         if (visible.length > 0) {
           setModels(visible);
           const selected = visible.find(model => model.selected);
-          if (selected && activeModel === 'deepseek-r1:14b') onModelChange(selected.name);
+          const activeExists = visible.some(model => model.name === activeModel);
+          if (selected && activeModel !== '__auto__' && (!activeExists || activeModel === 'deepseek-r1:14b' || activeModel === 'local-assistant')) {
+            onModelChange(selected.name);
+          }
+        } else {
+          setModels([]);
+          if (activeModel === 'deepseek-r1:14b') onModelChange('local-assistant');
         }
       })
       .catch(() => undefined);
     return () => { cancelled = true; };
   }, [activeModel, onModelChange]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadRuntime = () => {
+      getJson<RuntimeResponse>('/runtime')
+        .then((payload) => {
+          if (!cancelled) setRuntime(payload.runtime);
+        })
+        .catch(() => {
+          if (!cancelled) setRuntime({ state: 'error', label: 'runtime error' });
+        });
+    };
+    loadRuntime();
+    const timer = window.setInterval(loadRuntime, isStreaming ? 2000 : 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [isStreaming]);
+
+  const displayModel = activeModel === '__auto__' ? 'AUTO (registry)' : activeModel;
+  const runtimeState = isStreaming ? 'generating' : runtime?.state || 'offline';
+  const runtimeLabel = isStreaming ? 'generating' : runtime?.label || 'offline';
+  const runtimeClass = runtimeState === 'generating'
+    ? 'text-ttd-cyan border-ttd-cyan/30 bg-ttd-cyan/5'
+    : runtimeState === 'ready'
+    ? 'text-ttd-green border-ttd-green/30 bg-ttd-green/5'
+    : runtimeState === 'loading'
+    ? 'text-ttd-amber border-ttd-amber/30 bg-ttd-amber/5'
+    : 'text-ttd-red border-ttd-red/30 bg-ttd-red/5';
+  const runtimeDot = runtimeState === 'ready'
+    ? 'status-dot-green'
+    : runtimeState === 'generating'
+    ? ''
+    : 'status-dot-dim';
 
   return (
     <div className="flex items-center gap-3 px-4 py-2 border-b border-ttd-border bg-ttd-surface/80 backdrop-blur-sm z-30 flex-shrink-0">
@@ -123,14 +186,23 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
         </button>
       </div>
 
+      <div
+        className={`hidden lg:flex items-center gap-2 border rounded-sm px-2.5 py-1.5 text-[10px] uppercase tracking-wider ${runtimeClass}`}
+        title={runtime?.health || runtimeLabel}
+      >
+        <Activity size={11} />
+        <span className={`status-dot ${runtimeDot}`} />
+        <span>{runtimeLabel}</span>
+      </div>
+
       {/* Model selector */}
       <div className="relative">
         <button
           onClick={() => setModelDropOpen(!modelDropOpen)}
           className="flex items-center gap-2 bg-ttd-elevated border border-ttd-border rounded-sm px-3 py-1.5 text-xs hover:border-ttd-border-bright transition-colors"
         >
-          <span className="status-dot status-dot-green flex-shrink-0" />
-          <span className="text-ttd-text">{activeModel}</span>
+          <span className={`status-dot ${models.length ? 'status-dot-green' : 'status-dot-dim'} flex-shrink-0`} />
+          <span className="text-ttd-text">{models.length ? displayModel : 'No local model'}</span>
           <ChevronDown size={11} className="text-ttd-muted" />
         </button>
 
@@ -139,6 +211,25 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
             <div className="px-3 py-2 border-b border-ttd-border">
               <span className="text-[10px] text-ttd-muted tracking-wider uppercase">Select Model</span>
             </div>
+            {models.length === 0 && (
+              <div className="px-3 py-4 text-[11px] text-ttd-muted">
+                No ready `.gguf` files found in models/.
+              </div>
+            )}
+            {models.length > 0 && (
+              <button
+                onClick={() => { onModelChange('__auto__'); setModelDropOpen(false); }}
+                className={`w-full text-left px-3 py-2.5 flex items-center justify-between hover:bg-ttd-elevated transition-colors ${
+                  activeModel === '__auto__' ? 'bg-ttd-elevated' : ''
+                }`}
+              >
+                <div>
+                  <div className="text-xs text-ttd-text">AUTO (registry)</div>
+                  <div className="text-[10px] text-ttd-muted">chooses model by mode and task</div>
+                </div>
+                <span className="text-[9px] text-ttd-cyan border border-ttd-cyan/30 px-1 py-0.5 rounded-sm">FAST</span>
+              </button>
+            )}
             {models.map((m) => (
               <button
                 key={m.id}
@@ -149,7 +240,9 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
               >
                 <div>
                   <div className="text-xs text-ttd-text">{m.name}</div>
-                  <div className="text-[10px] text-ttd-muted">{m.type} · {m.vram}</div>
+                  <div className="text-[10px] text-ttd-muted">
+                    {m.type} · {m.vram} · {m.autoSelect ? 'AUTO' : 'MANUAL'}
+                  </div>
                 </div>
                 <div className="flex items-center gap-1.5">
                   <span className={`status-dot ${m.status === 'ready' ? 'status-dot-green' : 'status-dot-dim'}`} />
@@ -162,22 +255,6 @@ export default function ChatHeader({ mode, onModeChange, activeModel, onModelCha
           </div>
         )}
       </div>
-
-      {/* Streaming indicator */}
-      {isStreaming && (
-        <div className="flex items-center gap-1.5 animate-fade-in">
-          <div className="flex gap-0.5">
-            {[0, 1, 2].map((i) => (
-              <span
-                key={`dot-${i}`}
-                className="w-1 h-1 bg-ttd-green rounded-full animate-bounce"
-                style={{ animationDelay: `${i * 0.15}s` }}
-              />
-            ))}
-          </div>
-          <span className="text-[10px] text-ttd-green">generating</span>
-        </div>
-      )}
 
       <div className="ml-auto flex items-center gap-2">
         <button

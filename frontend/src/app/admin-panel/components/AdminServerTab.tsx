@@ -2,8 +2,9 @@
 
 import React, { useEffect, useState } from 'react';
 import { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { Activity } from 'lucide-react';
-import { getJson } from '@/lib/api';
+import { Activity, Download, HardDrive, RefreshCw, Terminal, Trash2 } from 'lucide-react';
+import { toast } from 'sonner';
+import { apiUrl, authHeaders, getJson, postJson } from '@/lib/api';
 
 type Interval = '1min' | '30min' | '1hr' | '1day' | '1week';
 
@@ -37,6 +38,24 @@ interface SystemResponse {
   history: Array<{ t: string; cpu: number; ram: number; gpu: number; vram: number; tps: number }>;
   processes: ProcessEntry[];
   system: Array<{ label: string; value: string }>;
+}
+
+interface DiskEntry {
+  name: string;
+  path: string;
+  exists: boolean;
+  bytes: number;
+  size: string;
+}
+
+interface DiskResponse {
+  ok: boolean;
+  entries: DiskEntry[];
+}
+
+interface LogsResponse {
+  ok: boolean;
+  logs: Record<string, { path: string; content: string; exists: boolean }>;
 }
 
 function generateTimeData(interval: Interval) {
@@ -99,6 +118,8 @@ export default function AdminServerTab() {
     { label: 'RAM', value: 'loading' },
     { label: 'Python', value: 'loading' },
   ]);
+  const [diskEntries, setDiskEntries] = useState<DiskEntry[]>([]);
+  const [logs, setLogs] = useState<LogsResponse['logs']>({});
 
   const INTERVALS: Interval[] = ['1min', '30min', '1hr', '1day', '1week'];
 
@@ -112,6 +133,46 @@ export default function AdminServerTab() {
       })
       .catch(() => undefined);
   }, [interval]);
+
+  const loadMaintenance = () => {
+    getJson<DiskResponse>('/admin/disk', true)
+      .then(payload => setDiskEntries(payload.entries))
+      .catch((error: Error) => toast.error(error.message));
+    getJson<LogsResponse>('/admin/logs?service=all&lines=80', true)
+      .then(payload => setLogs(payload.logs))
+      .catch((error: Error) => toast.error(error.message));
+  };
+
+  useEffect(() => {
+    loadMaintenance();
+  }, []);
+
+  const handleCleanup = async () => {
+    try {
+      await postJson('/admin/cleanup', { days: 7, truncateLogs: false }, true);
+      loadMaintenance();
+      toast.success('Old workspaces cleaned');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Cleanup failed');
+    }
+  };
+
+  const handleBackup = () => {
+    fetch(apiUrl('/admin/backup'), { headers: authHeaders() })
+      .then((response) => {
+        if (!response.ok) throw new Error('Backup failed');
+        return response.blob();
+      })
+      .then((blob) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `ttd-db-${Date.now()}.sqlite3`;
+        a.click();
+        URL.revokeObjectURL(url);
+      })
+      .catch((error: Error) => toast.error(error.message));
+  };
 
   return (
     <div className="p-6 max-w-screen-2xl mx-auto">
@@ -269,6 +330,54 @@ export default function AdminServerTab() {
                 <div key={`info-${item.label}`} className="flex items-center justify-between">
                   <span className="text-ttd-muted text-[10px]">{item.label}</span>
                   <span className="text-ttd-text text-[10px] font-mono text-right">{item.value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-ttd-surface border border-ttd-border rounded-sm p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <HardDrive size={13} className="text-ttd-cyan" />
+                <span className="text-[10px] text-ttd-muted tracking-wider">MAINTENANCE</span>
+              </div>
+              <button onClick={loadMaintenance} className="ttd-btn ttd-btn-ghost text-[10px] px-2 py-1 flex items-center gap-1">
+                <RefreshCw size={10} />
+                REFRESH
+              </button>
+            </div>
+            <div className="space-y-2 mb-3">
+              {diskEntries.map((entry) => (
+                <div key={entry.name} className="flex items-center justify-between gap-3 text-[10px]">
+                  <span className="text-ttd-muted uppercase">{entry.name}</span>
+                  <span className={entry.exists ? 'text-ttd-text font-mono' : 'text-ttd-red font-mono'}>{entry.exists ? entry.size : 'missing'}</span>
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <button onClick={handleBackup} className="ttd-btn ttd-btn-green text-[10px] px-2 py-1 flex items-center justify-center gap-1">
+                <Download size={10} />
+                DB BACKUP
+              </button>
+              <button onClick={handleCleanup} className="ttd-btn ttd-btn-red text-[10px] px-2 py-1 flex items-center justify-center gap-1">
+                <Trash2 size={10} />
+                CLEAN OLD
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-ttd-surface border border-ttd-border rounded-sm p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <Terminal size={13} className="text-ttd-green" />
+              <span className="text-[10px] text-ttd-muted tracking-wider">RUNTIME LOGS</span>
+            </div>
+            <div className="space-y-3">
+              {Object.entries(logs).map(([name, log]) => (
+                <div key={name}>
+                  <div className="text-[10px] text-ttd-cyan uppercase mb-1 truncate" title={log.path}>{name}</div>
+                  <pre className="bg-ttd-bg border border-ttd-border rounded-sm p-2 max-h-32 overflow-auto whitespace-pre-wrap text-[10px] text-ttd-dim">
+                    {log.content || 'No log lines.'}
+                  </pre>
                 </div>
               ))}
             </div>

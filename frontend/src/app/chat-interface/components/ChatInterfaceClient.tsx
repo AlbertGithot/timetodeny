@@ -1,0 +1,476 @@
+'use client';
+
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { toast } from 'sonner';
+import ChatSidebar from './ChatSidebar';
+import MessageThread from './MessageThread';
+import ChatInputBar from './ChatInputBar';
+import ChatHeader from './ChatHeader';
+import WorkspacePanel from './WorkspacePanel';
+import { getJson, postJson, streamChat } from '@/lib/api';
+import { clearTrackedGeneration, setTrackedGeneration } from '@/lib/generation-watch';
+
+export type Mode = 'instant' | 'expert';
+
+export interface Attachment {
+  id: string;
+  name: string;
+  type: 'file' | 'image';
+  size: string;
+  content?: string;
+}
+
+export interface GeneratedFile {
+  id: string;
+  name: string;
+  language?: string;
+  content: string;
+  type: 'code' | 'text' | 'image_url';
+}
+
+export interface Message {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  ts: string;
+  streaming?: boolean;
+  generation?: {
+    status: string;
+    phase: string;
+    activity: string;
+    progress: number;
+    etaSeconds?: number;
+    etaLabel?: string;
+  };
+  thinkingVisible?: boolean;
+  thinking?: string;
+  attachments?: Attachment[];
+  generatedFiles?: GeneratedFile[];
+  tokensPerSec?: number;
+  totalTokens?: number;
+  needsContinuation?: boolean;
+  testResult?: { passed: boolean; blocked?: boolean; output: string };
+}
+
+interface ChatDetailResponse {
+  ok: boolean;
+  chat: {
+    id: string;
+    mode: Mode;
+    model: string;
+    messages: Message[];
+  };
+}
+
+interface StreamDonePayload {
+  message?: Message;
+  chat?: {
+    id: string;
+  };
+}
+
+function isModelLoadingError(message: string): boolean {
+  const text = message.toLowerCase();
+  return text.includes('503')
+    || text.includes('service unavailable')
+    || text.includes('not ready')
+    || text.includes('still loading')
+    || text.includes('model loading');
+}
+
+function isNetworkStreamError(message: string): boolean {
+  const text = message.toLowerCase();
+  return text.includes('failed to fetch')
+    || text.includes('networkerror')
+    || text.includes('network error')
+    || text.includes('load failed')
+    || text.includes('terminated')
+    || text.includes('connection closed');
+}
+
+function latestStreamingAssistant(messages: Message[]): Message | null {
+  return [...messages].reverse().find(message =>
+    message.role === 'assistant'
+    && (message.streaming || message.generation?.status === 'streaming')
+  ) || null;
+}
+
+function publishTrackedMessage(chatId: string | null, message: Message | null): void {
+  if (!chatId || !message) return;
+  setTrackedGeneration({
+    chatId,
+    messageId: message.id,
+    status: message.generation?.status || 'streaming',
+    phase: message.generation?.phase || 'working',
+    activity: message.generation?.activity || 'Модель работает над вашим запросом...',
+    progress: message.generation?.progress || 1,
+  });
+}
+
+export default function ChatInterfaceClient() {
+  const searchParams = useSearchParams();
+  const initialMode = (searchParams.get('mode') as Mode) || 'instant';
+
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [mode, setMode] = useState<Mode>(initialMode);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [activeModel, setActiveModel] = useState('__auto__');
+  const [inputValue, setInputValue] = useState('');
+  const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
+  const [chatId, setChatId] = useState<string | null>(searchParams.get('chat'));
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const workspaceRefreshKey = useMemo(
+    () => messages.map(m => `${m.id}:${m.streaming ? '1' : '0'}:${m.generatedFiles?.length || 0}`).join('|'),
+    [messages]
+  );
+  const hasStreamingMessage = useMemo(() => messages.some(m => m.streaming), [messages]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  useEffect(() => {
+    const id = searchParams.get('chat');
+    if (!id) return;
+
+    let cancelled = false;
+    getJson<ChatDetailResponse>(`/chats/${id}`)
+      .then((payload) => {
+        if (cancelled) return;
+        const nextMessages = payload.chat.messages || [];
+        setChatId(payload.chat.id);
+        setMessages(nextMessages);
+        setIsStreaming(nextMessages.some(m => m.streaming));
+        setMode(payload.chat.mode || initialMode);
+        setActiveModel(payload.chat.model || '__auto__');
+        const streaming = latestStreamingAssistant(nextMessages);
+        if (streaming) publishTrackedMessage(payload.chat.id, streaming);
+        else clearTrackedGeneration(payload.chat.id);
+      })
+      .catch((error: Error) => toast.error(error.message));
+
+    return () => { cancelled = true; };
+  }, [searchParams, initialMode]);
+
+  useEffect(() => {
+    if (!chatId || !hasStreamingMessage) return;
+
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      getJson<ChatDetailResponse>(`/chats/${chatId}`)
+        .then((payload) => {
+          if (cancelled) return;
+          const nextMessages = payload.chat.messages || [];
+          setMessages(nextMessages);
+          setIsStreaming(nextMessages.some(m => m.streaming));
+          const streaming = latestStreamingAssistant(nextMessages);
+          if (streaming) publishTrackedMessage(payload.chat.id, streaming);
+          else clearTrackedGeneration(payload.chat.id);
+        })
+        .catch(() => undefined);
+    }, 1200);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [chatId, hasStreamingMessage]);
+
+  const handleSend = useCallback(async (text: string, attachments: Attachment[]) => {
+    if (!text.trim() && attachments.length === 0) return;
+
+    const now = new Date().toTimeString().slice(0, 8);
+    const userMsg: Message = {
+      id: `msg-u-${Date.now()}`,
+      role: 'user',
+      content: text,
+      ts: now,
+      attachments: attachments.length > 0 ? attachments : undefined,
+    };
+
+    setMessages(prev => [...prev, userMsg]);
+    setIsStreaming(true);
+
+    const streamingId = `msg-a-${Date.now()}`;
+    const thinkingText = mode === 'expert'
+      ? 'Waiting for backend reasoning stream...'
+      : undefined;
+
+    const assistantMsg: Message = {
+      id: streamingId,
+      role: 'assistant',
+      content: '',
+      ts: now,
+      streaming: true,
+      generation: {
+        status: 'streaming',
+        phase: 'starting',
+        activity: 'Модель работает над вашим запросом...',
+        progress: 1,
+      },
+      thinking: thinkingText,
+      thinkingVisible: mode === 'expert',
+    };
+
+    setMessages(prev => [...prev, assistantMsg]);
+
+    let accumulated = '';
+    let assistantMessageId = streamingId;
+    let knownChatId = chatId;
+    let keepWatchingSavedGeneration = false;
+    const controller = new AbortController();
+    const publishGeneration = (generation: Message['generation'] = assistantMsg.generation) => {
+      if (!knownChatId) return;
+      setTrackedGeneration({
+        chatId: knownChatId,
+        messageId: assistantMessageId,
+        status: generation?.status || 'streaming',
+        phase: generation?.phase || 'starting',
+        activity: generation?.activity || 'Модель работает над вашим запросом...',
+        progress: generation?.progress || 1,
+      });
+    };
+
+    publishGeneration();
+    abortRef.current = controller;
+    try {
+      await streamChat(
+        {
+          chatId,
+          message: text,
+          mode,
+          model: activeModel,
+          attachments,
+        },
+        {
+          onMeta: (data) => {
+            if (typeof data.chatId === 'string') {
+              knownChatId = data.chatId;
+              setChatId(data.chatId);
+            }
+            if (typeof data.assistantMessageId === 'string') {
+              assistantMessageId = data.assistantMessageId;
+              setMessages(prev => prev.map(m =>
+                m.id === streamingId ? { ...m, id: assistantMessageId } : m
+              ));
+            }
+            publishGeneration();
+          },
+          onThinking: (thinking) => {
+            setMessages(prev => prev.map(m =>
+              m.id === assistantMessageId ? { ...m, thinking, thinkingVisible: true } : m
+            ));
+          },
+          onStatus: (status) => {
+            const generation = {
+              status: String(status.status || 'streaming'),
+              phase: String(status.phase || 'working'),
+              activity: String(status.activity || 'Модель работает над вашим запросом...'),
+              progress: Number(status.progress || 0),
+              etaSeconds: Number(status.etaSeconds || 0),
+              etaLabel: String(status.etaLabel || ''),
+            };
+            publishGeneration(generation);
+            setMessages(prev => prev.map(m =>
+              m.id === assistantMessageId
+                ? {
+                    ...m,
+                    generation,
+                  }
+                : m
+            ));
+          },
+          onToken: (token) => {
+            accumulated += token;
+            setMessages(prev => prev.map(m =>
+              m.id === assistantMessageId
+                ? { ...m, content: accumulated, thinkingVisible: false }
+                : m
+            ));
+          },
+          onDone: (data) => {
+            const done = data as StreamDonePayload;
+            if (done.chat?.id) setChatId(done.chat.id);
+            clearTrackedGeneration(done.chat?.id || knownChatId || chatId || undefined);
+            if (done.message) {
+              setMessages(prev => prev.map(m =>
+                m.id === assistantMessageId ? { ...done.message!, streaming: false } : m
+              ));
+              const total = done.message.totalTokens || 0;
+              const speed = done.message.tokensPerSec ? `${done.message.tokensPerSec} tok/s` : 'stream complete';
+              toast.success(`Response complete · ${total} tokens · ${speed}`);
+            }
+          },
+          onError: (error) => {
+            throw new Error(error);
+          },
+        },
+        controller.signal
+      );
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        clearTrackedGeneration(knownChatId || chatId || undefined);
+        setMessages(prev => prev.map(m =>
+          m.id === assistantMessageId
+            ? { ...m, content: accumulated || 'Generation stopped.', streaming: false }
+            : m
+        ));
+        return;
+      }
+      const message = error instanceof Error ? error.message : 'Stream failed';
+      const modelLoading = isModelLoadingError(message);
+      const networkStreamError = isNetworkStreamError(message);
+      if (networkStreamError && knownChatId) {
+        keepWatchingSavedGeneration = true;
+        setChatId(knownChatId);
+        try {
+          const payload = await getJson<ChatDetailResponse>(`/chats/${knownChatId}`);
+          const nextMessages = payload.chat.messages || [];
+          setMessages(nextMessages);
+          setIsStreaming(nextMessages.some(m => m.streaming));
+          const streaming = latestStreamingAssistant(nextMessages);
+          if (streaming) publishTrackedMessage(payload.chat.id, streaming);
+          else clearTrackedGeneration(payload.chat.id);
+        } catch {
+          publishGeneration({
+            status: 'streaming',
+            phase: 'reconnect',
+            activity: 'Соединение со стримом оборвалось. Подхватываю сохраненную генерацию...',
+            progress: 5,
+          });
+          setMessages(prev => prev.map(m =>
+            m.id === assistantMessageId
+              ? {
+                  ...m,
+                  streaming: true,
+                  generation: {
+                    status: 'streaming',
+                    phase: 'reconnect',
+                    activity: 'Соединение со стримом оборвалось. Подхватываю сохраненную генерацию...',
+                    progress: Math.max(5, m.generation?.progress || 5),
+                  },
+                }
+              : m
+          ));
+        }
+        toast('Соединение со стримом оборвалось. Подхватываю сохраненную генерацию.');
+        return;
+      }
+      clearTrackedGeneration(knownChatId || chatId || undefined);
+      setMessages(prev => prev.map(m =>
+        m.id === assistantMessageId
+          ? {
+              ...m,
+              content: modelLoading
+                ? 'Model loading. llama.cpp is still warming up; try again in a moment.'
+                : `Backend error: ${message}`,
+              streaming: false,
+              testResult: modelLoading ? undefined : { passed: false, output: message },
+            }
+          : m
+      ));
+      if (modelLoading) {
+        toast('Model loading. Wait a moment and retry.');
+      } else {
+        toast.error(message);
+      }
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+      if (!keepWatchingSavedGeneration) {
+        clearTrackedGeneration(knownChatId || chatId || undefined);
+        setIsStreaming(false);
+      }
+    }
+  }, [activeModel, chatId, mode]);
+
+  const handleStop = useCallback(() => {
+    abortRef.current?.abort();
+    void postJson('/chat/stop', {}).catch(() => undefined);
+    clearTrackedGeneration(chatId || undefined);
+    setIsStreaming(false);
+    setMessages(prev => prev.map(m =>
+      m.streaming ? { ...m, streaming: false, content: m.content || 'Generation stopped.' } : m
+    ));
+    toast('Generation stopped');
+  }, [chatId]);
+
+  const handleContinue = useCallback((message: Message) => {
+    const prompt = [
+      'Продолжи предыдущий ответ ровно с места остановки.',
+      'Не повторяй уже написанное.',
+      'Если ответ был с кодом или списком, продолжи структуру и закрой ее корректно.',
+    ].join(' ');
+    void handleSend(prompt, []);
+  }, [handleSend]);
+
+  const handleModeChange = (newMode: Mode) => {
+    setMode(newMode);
+    toast.success(`Mode switched to ${newMode.toUpperCase()}`);
+  };
+
+  return (
+    <div className="h-screen bg-ttd-bg flex flex-col overflow-hidden">
+      <ChatHeader
+        mode={mode}
+        onModeChange={handleModeChange}
+        activeModel={activeModel}
+        onModelChange={setActiveModel}
+        isStreaming={isStreaming}
+        onSidebarToggle={() => setSidebarOpen(true)}
+        onNewChat={() => {
+          clearTrackedGeneration(chatId || undefined);
+          setChatId(null);
+          setMessages([]);
+          toast('New conversation started');
+        }}
+      />
+
+      <div className="flex-1 flex overflow-hidden">
+        {/* Sidebar overlay */}
+        {sidebarOpen && (
+          <div className="fixed inset-0 z-50 flex">
+            <ChatSidebar
+              activeChatId={chatId}
+              onClose={() => setSidebarOpen(false)}
+              onChatDeleted={(deletedId) => {
+                if (deletedId === chatId) {
+                  clearTrackedGeneration(deletedId);
+                  setChatId(null);
+                  setMessages([]);
+                  setIsStreaming(false);
+                  setSidebarOpen(false);
+                  window.history.replaceState(null, '', '/chat-interface');
+                }
+              }}
+            />
+            <div className="flex-1 sidebar-overlay" onClick={() => setSidebarOpen(false)} />
+          </div>
+        )}
+
+        {/* Message area */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          <MessageThread
+            messages={messages}
+            isStreaming={isStreaming}
+            messagesEndRef={messagesEndRef}
+            onContinue={handleContinue}
+          />
+          <ChatInputBar
+            value={inputValue}
+            onChange={setInputValue}
+            onSend={handleSend}
+            onStop={handleStop}
+            isStreaming={isStreaming}
+            mode={mode}
+            pendingAttachments={pendingAttachments}
+            onAttachmentsChange={setPendingAttachments}
+          />
+        </div>
+        <WorkspacePanel chatId={chatId} refreshKey={workspaceRefreshKey} />
+      </div>
+    </div>
+  );
+}

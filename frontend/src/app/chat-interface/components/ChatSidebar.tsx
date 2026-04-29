@@ -22,9 +22,11 @@ interface ChatsResponse {
 
 interface Props {
   onClose: () => void;
+  activeChatId?: string | null;
+  onChatDeleted?: (id: string) => void;
 }
 
-export default function ChatSidebar({ onClose }: Props) {
+export default function ChatSidebar({ onClose, activeChatId, onChatDeleted }: Props) {
   const router = useRouter();
   const [search, setSearch] = useState('');
   const [chats, setChats] = useState<ChatEntry[]>([]);
@@ -45,6 +47,7 @@ export default function ChatSidebar({ onClose }: Props) {
     try {
       await deleteJson(`/chats/${id}`);
       setChats(prev => prev.filter(c => c.id !== id));
+      onChatDeleted?.(id);
       toast.success('Conversation deleted');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Delete failed');
@@ -113,6 +116,7 @@ export default function ChatSidebar({ onClose }: Props) {
                 <div className="flex-1 min-w-0">
                   <div className="text-xs text-ttd-text truncate group-hover:text-ttd-green transition-colors">
                     {chat.title}
+                    {chat.id === activeChatId && <span className="ml-1 text-[9px] text-ttd-green">ACTIVE</span>}
                   </div>
                   <div className="flex items-center gap-1.5 mt-0.5">
                     <span className="text-[9px] text-ttd-muted truncate max-w-[100px]">{chat.model}</span>

@@ -1,7 +1,32 @@
-export const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://127.0.0.1:8000/api';
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '0.0.0.0']);
+const RAW_API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/api';
+
+function normalizeApiBase(value: string): string {
+  return value.endsWith('/') && value !== '/' ? value.slice(0, -1) : value;
+}
+
+function resolveApiBase(): string {
+  const normalized = normalizeApiBase(RAW_API_BASE);
+  if (typeof window === 'undefined') return normalized;
+
+  try {
+    const resolved = new URL(normalized, window.location.origin);
+    const siteHost = window.location.hostname;
+    if (LOOPBACK_HOSTS.has(resolved.hostname) && !LOOPBACK_HOSTS.has(siteHost)) {
+      return '/api';
+    }
+  } catch {
+    return normalized;
+  }
+
+  return normalized;
+}
+
+export const API_BASE = resolveApiBase();
 
 export function apiUrl(path: string): string {
-  return `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return API_BASE === '/' ? normalizedPath : `${API_BASE}${normalizedPath}`;
 }
 
 export function getAdminToken(): string {
@@ -64,6 +89,7 @@ export async function deleteJson<T>(path: string, admin = false): Promise<T> {
 interface StreamHandlers {
   onMeta?: (data: Record<string, unknown>) => void;
   onThinking?: (text: string) => void;
+  onStatus?: (data: Record<string, unknown>) => void;
   onToken?: (text: string) => void;
   onDone?: (data: Record<string, unknown>) => void;
   onError?: (error: string) => void;
@@ -80,11 +106,12 @@ function parseSseBlock(block: string): { event: string; data: Record<string, unk
   };
 }
 
-export async function streamChat(payload: unknown, handlers: StreamHandlers): Promise<void> {
+export async function streamChat(payload: unknown, handlers: StreamHandlers, signal?: AbortSignal): Promise<void> {
   const response = await fetch(apiUrl('/chat/stream'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    signal,
   });
 
   if (!response.ok || !response.body) {
@@ -109,6 +136,7 @@ export async function streamChat(payload: unknown, handlers: StreamHandlers): Pr
       if (parsed) {
         if (parsed.event === 'meta') handlers.onMeta?.(parsed.data);
         if (parsed.event === 'thinking') handlers.onThinking?.(String(parsed.data.text || ''));
+        if (parsed.event === 'status') handlers.onStatus?.(parsed.data);
         if (parsed.event === 'token') handlers.onToken?.(String(parsed.data.text || ''));
         if (parsed.event === 'done') handlers.onDone?.(parsed.data);
         if (parsed.event === 'error') handlers.onError?.(String(parsed.data.error || 'Unknown stream error'));

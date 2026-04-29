@@ -9,6 +9,7 @@ interface Props {
   value: string;
   onChange: (v: string) => void;
   onSend: (text: string, attachments: Attachment[]) => void;
+  onStop: () => void;
   isStreaming: boolean;
   mode: Mode;
   pendingAttachments: Attachment[];
@@ -16,7 +17,7 @@ interface Props {
 }
 
 export default function ChatInputBar({
-  value, onChange, onSend, isStreaming, mode, pendingAttachments, onAttachmentsChange,
+  value, onChange, onSend, onStop, isStreaming, mode, pendingAttachments, onAttachmentsChange,
 }: Props) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -44,7 +45,7 @@ export default function ChatInputBar({
       if (file.type.startsWith('image/')) {
         reader.readAsDataURL(file);
       } else {
-        reader.readAsText(file.slice(0, 256 * 1024));
+        reader.readAsText(file);
       }
     })
   );
@@ -68,7 +69,6 @@ export default function ChatInputBar({
   };
 
   const charCount = value.length;
-  const isNearLimit = charCount > 3500;
 
   return (
     <div className="flex-shrink-0 border-t border-ttd-border bg-ttd-surface/80 backdrop-blur-sm">
@@ -96,12 +96,12 @@ export default function ChatInputBar({
       )}
 
       {/* Input area */}
-      <div className="px-4 py-3 flex items-end gap-3">
+      <div className="px-4 pt-3 pb-2 flex items-center gap-3">
         {/* Attach button */}
-        <div className="flex-shrink-0 flex gap-1">
+        <div className="flex-shrink-0 flex gap-1 self-center">
           <button
             onClick={() => fileInputRef.current?.click()}
-            className="w-8 h-8 flex items-center justify-center rounded hover:bg-ttd-elevated border border-ttd-border hover:border-ttd-border-bright transition-all"
+            className="w-10 h-10 flex items-center justify-center rounded-sm hover:bg-ttd-elevated border border-ttd-border hover:border-ttd-border-bright transition-all"
             title="Attach file"
           >
             <Paperclip size={13} className="text-ttd-muted" />
@@ -117,7 +117,7 @@ export default function ChatInputBar({
         </div>
 
         {/* Textarea */}
-        <div className="flex-1 relative">
+        <div className="flex-1 relative min-w-0">
           <textarea
             ref={textareaRef}
             value={value}
@@ -128,7 +128,7 @@ export default function ChatInputBar({
             }
             rows={1}
             disabled={isStreaming}
-            className="ttd-input resize-none overflow-hidden min-h-[40px] max-h-[200px] py-2.5 pr-16 leading-relaxed disabled:opacity-50 disabled:cursor-not-allowed"
+            className="ttd-input resize-none overflow-hidden min-h-[44px] max-h-[200px] py-[11px] pr-16 leading-[20px] disabled:opacity-50 disabled:cursor-not-allowed"
             style={{
               height: 'auto',
               overflowY: value.split('\n').length > 5 ? 'auto' : 'hidden',
@@ -140,16 +140,16 @@ export default function ChatInputBar({
             }}
           />
           {/* Char count */}
-          <span className={`absolute bottom-2 right-2 text-[9px] ${isNearLimit ? 'text-ttd-amber' : 'text-ttd-dim'}`}>
+          <span className="absolute bottom-2 right-2 text-[9px] text-ttd-dim">
             {charCount > 0 ? `${charCount}` : ''}
           </span>
         </div>
 
         {/* Send/Stop button */}
         <button
-          onClick={isStreaming ? undefined : handleSubmit}
+          onClick={isStreaming ? onStop : handleSubmit}
           disabled={!isStreaming && !value.trim() && pendingAttachments.length === 0}
-          className={`flex-shrink-0 w-9 h-9 flex items-center justify-center rounded-sm border transition-all duration-150 active:scale-95 ${
+          className={`flex-shrink-0 w-10 h-10 flex items-center justify-center rounded-sm border transition-all duration-150 active:scale-95 self-center ${
             isStreaming
               ? 'border-ttd-red/50 bg-ttd-red/10 text-ttd-red hover:bg-ttd-red/20 cursor-pointer'
               : value.trim() || pendingAttachments.length > 0

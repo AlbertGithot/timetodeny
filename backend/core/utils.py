@@ -5,6 +5,7 @@ import secrets
 from datetime import datetime
 from typing import Any
 
+from django.conf import settings
 from django.http import HttpRequest, JsonResponse
 from django.utils import timezone
 
@@ -55,6 +56,12 @@ def require_admin(request: HttpRequest) -> tuple[AdminSession | None, JsonRespon
         return None, json_response({"ok": False, "error": "Missing admin token"}, status=401)
     session = AdminSession.objects.filter(token=token, status="active").first()
     if not session:
+        return None, json_response({"ok": False, "error": "Admin session expired"}, status=401)
+    ttl = int(getattr(settings, "TTD_ADMIN_SESSION_TTL_SECONDS", 86400))
+    if ttl > 0 and (timezone.now() - session.login_time).total_seconds() > ttl:
+        session.status = "ended"
+        session.logout_time = timezone.now()
+        session.save(update_fields=["status", "logout_time", "updated_at"])
         return None, json_response({"ok": False, "error": "Admin session expired"}, status=401)
     return session, None
 

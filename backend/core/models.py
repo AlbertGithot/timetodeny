@@ -127,12 +127,61 @@ class ModelRegistry(TimeStampedModel):
     quantization = models.CharField(max_length=64, default="Q4_K_M")
     download_progress = models.PositiveSmallIntegerField(default=0)
     local_path = models.CharField(max_length=500, blank=True)
+    auto_select = models.BooleanField(default=True)
+    use_for_instant = models.BooleanField(default=True)
+    use_for_expert = models.BooleanField(default=True)
+    instant_context_messages = models.PositiveSmallIntegerField(default=4)
+    expert_context_messages = models.PositiveSmallIntegerField(default=12)
+    instant_max_tokens = models.PositiveIntegerField(default=512)
+    expert_max_tokens = models.PositiveIntegerField(default=2048)
+    llama_context_size = models.PositiveIntegerField(default=0)
+    llama_threads = models.PositiveIntegerField(default=0)
+    llama_gpu_layers = models.IntegerField(default=-1)
+    prompt_cache_enabled = models.BooleanField(default=True)
+    run_tests = models.BooleanField(default=True)
+    max_test_files = models.PositiveSmallIntegerField(default=2)
 
     class Meta:
         ordering = ["-selected", "hidden", "name"]
 
     def __str__(self) -> str:
         return self.name
+
+
+class ModelInstallJob(TimeStampedModel):
+    TYPE_CHOICES = ModelRegistry.TYPE_CHOICES
+    STATUS_CHOICES = (
+        ("queued", "Queued"),
+        ("downloading", "Downloading"),
+        ("verifying", "Verifying"),
+        ("ready", "Ready"),
+        ("failed", "Failed"),
+        ("cancelled", "Cancelled"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    repo_id = models.CharField(max_length=255)
+    filename = models.CharField(max_length=255)
+    model_type = models.CharField(max_length=20, choices=TYPE_CHOICES, default="text")
+    quantization = models.CharField(max_length=64, default="Q4_K_M")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="queued")
+    progress = models.PositiveSmallIntegerField(default=0)
+    bytes_downloaded = models.BigIntegerField(default=0)
+    bytes_total = models.BigIntegerField(default=0)
+    speed_bps = models.FloatField(default=0)
+    eta_seconds = models.PositiveIntegerField(default=0)
+    log = models.TextField(blank=True)
+    error_details = models.TextField(blank=True)
+    local_path = models.CharField(max_length=500, blank=True)
+    requested_by_ip = models.GenericIPAddressField(null=True, blank=True)
+    requested_by_user_agent = models.TextField(blank=True)
+    model = models.ForeignKey(ModelRegistry, null=True, blank=True, related_name="install_jobs", on_delete=models.SET_NULL)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.repo_id}/{self.filename} [{self.status}]"
 
 
 class AdminSession(TimeStampedModel):

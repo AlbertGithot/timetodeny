@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from django.db.models import Count
+from django.utils import timezone
 
-from .models import AdminSession, Chat, GeneratedFile, Message, ModelRegistry, RequestLog
+from .models import AdminSession, Chat, GeneratedFile, Message, ModelInstallJob, ModelRegistry, RequestLog
 from .utils import now_label, time_label
 
 
@@ -16,6 +17,62 @@ def generated_file_to_dict(file: GeneratedFile) -> dict:
     }
 
 
+def bytes_label(value: int | float | None) -> str:
+    amount = float(value or 0)
+    if amount <= 0:
+        return "-"
+    gb = amount / (1024**3)
+    if gb >= 1:
+        return f"{gb:.2f}GB"
+    mb = amount / (1024**2)
+    if mb >= 1:
+        return f"{mb:.1f}MB"
+    kb = amount / 1024
+    if kb >= 1:
+        return f"{kb:.1f}KB"
+    return f"{int(amount)}B"
+
+
+def eta_label(seconds: int | float | None) -> str:
+    value = int(seconds or 0)
+    if value <= 0:
+        return "-"
+    minutes, sec = divmod(value, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {sec}s"
+    return f"{sec}s"
+
+
+def generation_eta(message: Message, generation: dict) -> tuple[int, str]:
+    if generation.get("status") != "streaming":
+        return 0, "-"
+    try:
+        progress = int(generation.get("progress") or 0)
+    except (TypeError, ValueError):
+        progress = 0
+    if progress <= 2 or progress >= 99:
+        return 0, "calculating"
+    elapsed = max(1, int((timezone.now() - message.created_at).total_seconds()))
+    remaining = int(elapsed * ((100 - progress) / max(1, progress)))
+    remaining = max(1, min(remaining, 24 * 60 * 60))
+    return remaining, eta_label(remaining)
+
+
+def generation_to_dict(message: Message, generation: dict) -> dict:
+    eta_seconds, eta_text = generation_eta(message, generation)
+    return {
+        "status": generation.get("status") or "streaming",
+        "phase": generation.get("phase") or "working",
+        "activity": generation.get("activity") or "Модель работает над вашим запросом...",
+        "progress": int(generation.get("progress") or 0),
+        "etaSeconds": eta_seconds,
+        "etaLabel": eta_text,
+    }
+
+
 def message_to_dict(message: Message) -> dict:
     payload = {
         "id": str(message.id),
@@ -23,6 +80,13 @@ def message_to_dict(message: Message) -> dict:
         "content": message.content,
         "ts": time_label(message.created_at),
     }
+    generation = message.metadata.get("generation") if isinstance(message.metadata, dict) else None
+    if isinstance(message.metadata, dict) and message.metadata.get("needsContinuation"):
+        payload["needsContinuation"] = True
+    if isinstance(generation, dict):
+        payload["generation"] = generation_to_dict(message, generation)
+        if generation.get("status") == "streaming":
+            payload["streaming"] = True
     if message.thinking:
         payload["thinking"] = message.thinking
         payload["thinkingVisible"] = False
@@ -46,7 +110,11 @@ def message_to_dict(message: Message) -> dict:
     if generated:
         payload["generatedFiles"] = generated
     if message.test_passed is not None:
-        payload["testResult"] = {"passed": message.test_passed, "output": message.test_output}
+        payload["testResult"] = {
+            "passed": message.test_passed,
+            "blocked": "TESTS BLOCKED" in (message.test_output or ""),
+            "output": message.test_output,
+        }
     return payload
 
 
@@ -86,6 +154,46 @@ def model_to_dict(model: ModelRegistry) -> dict:
         "systemPrompt": model.system_prompt,
         "quantization": model.quantization,
         "downloadProgress": model.download_progress,
+        "localPath": model.local_path,
+        "performance": {
+            "autoSelect": model.auto_select,
+            "useForInstant": model.use_for_instant,
+            "useForExpert": model.use_for_expert,
+            "instantContextMessages": model.instant_context_messages,
+            "expertContextMessages": model.expert_context_messages,
+            "instantMaxTokens": model.instant_max_tokens,
+            "expertMaxTokens": model.expert_max_tokens,
+            "llamaContextSize": model.llama_context_size,
+            "llamaThreads": model.llama_threads,
+            "llamaGpuLayers": model.llama_gpu_layers,
+            "promptCacheEnabled": model.prompt_cache_enabled,
+            "runTests": model.run_tests,
+            "maxTestFiles": model.max_test_files,
+        },
+    }
+
+
+def install_job_to_dict(job: ModelInstallJob) -> dict:
+    return {
+        "id": str(job.id),
+        "repoId": job.repo_id,
+        "filename": job.filename,
+        "type": job.model_type,
+        "quantization": job.quantization,
+        "status": job.status,
+        "progress": job.progress,
+        "bytesDownloaded": job.bytes_downloaded,
+        "bytesTotal": job.bytes_total,
+        "downloadedLabel": bytes_label(job.bytes_downloaded),
+        "totalLabel": bytes_label(job.bytes_total),
+        "speedLabel": f"{bytes_label(job.speed_bps)}/s" if job.speed_bps > 0 else "-",
+        "etaLabel": eta_label(job.eta_seconds),
+        "log": job.log,
+        "errorDetails": job.error_details or None,
+        "localPath": job.local_path,
+        "model": model_to_dict(job.model) if job.model else None,
+        "createdAt": now_label(job.created_at),
+        "updatedAt": now_label(job.updated_at),
     }
 
 

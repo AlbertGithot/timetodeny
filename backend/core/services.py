@@ -4,14 +4,17 @@ import html
 import json
 import os
 import re
+import shutil
+import socket
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Callable, Iterable
 
 import psutil
 from django.conf import settings
@@ -100,6 +103,164 @@ def infer_file(prompt: str) -> tuple[str, str]:
         "txt": "text",
     }.get(ext, "text")
     return name, language
+
+
+def language_from_filename(filename: str, fallback: str = "text") -> str:
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return {
+        "py": "python",
+        "tsx": "tsx",
+        "ts": "typescript",
+        "js": "javascript",
+        "html": "html",
+        "css": "css",
+        "json": "json",
+        "md": "markdown",
+        "txt": "text",
+        "yml": "yaml",
+        "yaml": "yaml",
+        "sh": "bash",
+    }.get(ext, fallback)
+
+
+def should_test_generated_file(language: str) -> bool:
+    return language in {"python", "html", "json"}
+
+
+MALWARE_TERMS = {
+    "virus",
+    "malware",
+    "ransomware",
+    "trojan",
+    "keylogger",
+    "botnet",
+    "worm",
+    "stealer",
+    "backdoor",
+    "reverse shell",
+    "remote access trojan",
+    "вирус",
+    "малвар",
+    "вредонос",
+    "троян",
+    "кейлоггер",
+    "ботнет",
+    "червь",
+    "стилер",
+    "шифровальщик",
+    "бекдор",
+    "ратник",
+}
+
+MALWARE_VERBS = {
+    "create",
+    "build",
+    "write",
+    "make",
+    "generate",
+    "создай",
+    "сделай",
+    "напиши",
+    "сгенерируй",
+    "разработай",
+    "собери",
+}
+
+MALWARE_CODE_MARKERS = (
+    "pynput.keyboard",
+    "keyboard.hook",
+    "getasynckeystate",
+    "setwindowshookex",
+    "cryptography.fernet",
+    "os.walk(",
+    "winreg.hkey_current_user",
+    "software\\microsoft\\windows\\currentversion\\run",
+    "/bin/sh -i",
+    "nc -e",
+    "powershell -enc",
+)
+
+
+def looks_like_malware_request(prompt: str) -> bool:
+    text = (prompt or "").lower()
+    has_term = any(term in text for term in MALWARE_TERMS)
+    if not has_term:
+        return False
+    return any(verb in text for verb in MALWARE_VERBS) or "код" in text or "code" in text
+
+
+def looks_like_malware_content(filename: str, content: str) -> bool:
+    text = f"{filename}\n{content}".lower()
+    if any(term in text for term in MALWARE_TERMS):
+        return True
+    marker_count = sum(1 for marker in MALWARE_CODE_MARKERS if marker in text)
+    return marker_count >= 2
+
+
+def should_block_generated_test(prompt: str, filename: str, content: str) -> bool:
+    return looks_like_malware_request(prompt) or looks_like_malware_content(filename, content)
+
+
+def safety_blocked_test_output() -> str:
+    return (
+        "TESTS BLOCKED BY SAFETY POLICY: request or generated content looks like malware. "
+        "No compile/run/test command was executed."
+    )
+
+
+def artifact_protocol_prompt() -> str:
+    return """You can create real workspace files when that is the right way to satisfy the user.
+Decide yourself whether the user needs normal chat text or one or more files.
+When the user asks for code, a project, files, "send it as files", or an implementation that is better delivered as files, use this workflow:
+
+1. Write a very short implementation plan in normal chat text.
+2. Output every needed file as a complete file block.
+3. Finish with a short summary of what was created and what should be tested.
+
+File blocks must use this exact format:
+
+```ttd-file path="relative/path.ext"
+full file content here
+```
+
+Rules:
+- Use safe relative paths only.
+- Do not use absolute paths.
+- Do not omit file content.
+- Do not put commentary inside file blocks.
+- If multiple files are needed, output multiple ttd-file blocks.
+- Keep explanation outside file blocks short.
+- For normal chat answers, do not output ttd-file blocks.
+- Do not mention the ttd-file protocol to the user.
+"""
+
+
+def agent_capability_prompt() -> str:
+    return """Operate like a pragmatic coding agent inside the Time To Deny app.
+Your real capabilities in this environment:
+- Understand broad user requests, break them into practical steps, and keep momentum without asking unnecessary questions.
+- Write, edit, and organize code as complete workspace files when that is more useful than plain text.
+- Create multiple files for a project, using clear relative paths and complete file contents.
+- Produce runnable code, configs, docs, scripts, tests, and troubleshooting notes when the user asks for implementation help.
+- Explain backend, frontend, Linux, Django, Next.js, llama.cpp, model registry, and server/runtime problems in concrete operational terms.
+- Diagnose failures from visible logs or errors and suggest specific commands/settings to check.
+- Keep normal chat answers concise, direct, and in the user's language.
+- In Expert mode, reason carefully internally, then present a clean final answer with assumptions and next steps when useful.
+
+Important limits:
+- Do not claim that you directly opened a shell, browsed the internet, installed packages, changed the server, or ran commands unless the platform explicitly provided that result in the conversation.
+- When you create files, the platform will extract your file blocks into the workspace and can run supported checks after that.
+- If a task needs a missing external tool, credential, server access, or live internet lookup, say exactly what is missing and what the user should run or provide.
+- Never invent logs, command output, file contents, model availability, or successful tests.
+"""
+
+
+def _safe_generated_relative_path(value: str, fallback: str) -> str:
+    cleaned = value.strip().strip("\"'` ")
+    cleaned = cleaned.replace("\\", "/").lstrip("/")
+    parts = [safe_filename(part, "") for part in cleaned.split("/") if part and part not in {".", ".."}]
+    result = "/".join(part for part in parts if part)
+    return result or fallback
 
 
 def generated_dir(kind: str) -> Path:
@@ -202,12 +363,18 @@ console.log(runTask(process.argv.slice(2).join(' ')));
 
 def test_generated_file(path: Path, language: str) -> tuple[bool, str]:
     if language == "python":
+        env = os.environ.copy()
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         proc = subprocess.run(
-            ["python3", "-m", "py_compile", str(path)],
+            ["python3", "-B", "-m", "py_compile", str(path)],
             capture_output=True,
+            env=env,
             text=True,
             timeout=20,
         )
+        pycache = path.parent / "__pycache__"
+        if pycache.exists():
+            shutil.rmtree(pycache, ignore_errors=True)
         if proc.returncode == 0:
             return True, "python -m py_compile: OK"
         return False, (proc.stderr or proc.stdout or "py_compile failed").strip()
@@ -220,17 +387,163 @@ def test_generated_file(path: Path, language: str) -> tuple[bool, str]:
         passed = "<html" in content.lower() and "</html>" in content.lower()
         return passed, "HTML smoke check: OK" if passed else "HTML smoke check failed"
 
+    if language == "json":
+        try:
+            json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return False, f"JSON parse failed: {exc}"
+        return True, "JSON parse check: OK"
+
     return True, "File write smoke check: OK"
 
 
-def create_code_artifact(prompt: str) -> tuple[ArtifactDraft, bool, str]:
+def test_generated_content(content: str, filename: str, language: str) -> tuple[bool, str]:
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / safe_filename(Path(filename).name, f"generated.{language or 'txt'}")
+        target.write_text(content, encoding="utf-8")
+        return test_generated_file(target, language)
+
+
+def create_code_artifact(prompt: str, chat_id: str | None = None) -> tuple[ArtifactDraft, bool, str]:
     name, language = infer_file(prompt)
     content = build_code(prompt, name, language)
-    disk_name = f"{uuid.uuid4().hex}_{safe_filename(name, 'generated.txt')}"
-    disk_path = generated_dir("files") / disk_name
-    disk_path.write_text(content, encoding="utf-8")
-    passed, output = test_generated_file(disk_path, language)
+    if chat_id:
+        from .workspaces import stage_workspace_file
+
+        disk_path = stage_workspace_file(chat_id, name, content)
+    else:
+        disk_name = f"{uuid.uuid4().hex}_{safe_filename(name, 'generated.txt')}"
+        disk_path = generated_dir("files") / disk_name
+        disk_path.write_text(content, encoding="utf-8")
+    if should_block_generated_test(prompt, name, content):
+        passed, output = False, safety_blocked_test_output()
+    else:
+        passed, output = test_generated_content(content, name, language)
     return ArtifactDraft(name=name, language=language, content=content, file_type="code", disk_path=str(disk_path)), passed, output
+
+
+def create_model_file_artifacts(
+    prompt: str,
+    response: str,
+    chat_id: str,
+    *,
+    allow_fallback: bool = False,
+    run_tests: bool = True,
+    max_test_files: int = 2,
+) -> tuple[list[ArtifactDraft], bool | None, str, str]:
+    from .workspaces import stage_workspace_file
+
+    artifacts: list[ArtifactDraft] = []
+    test_outputs: list[str] = []
+    passed_values: list[bool] = []
+    consumed_ranges: list[tuple[int, int]] = []
+    tested_files = 0
+    safety_blocked = False
+
+    explicit_pattern = re.compile(
+        r"```(?:ttd-file|file)\s+(?:path=)?[\"']?(?P<path>[^\"'\n`]+)[\"']?\s*\n(?P<content>.*?)```",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for match in explicit_pattern.finditer(response):
+        raw_path = match.group("path")
+        content = match.group("content").strip("\n")
+        if not content.strip():
+            continue
+        relative_path = _safe_generated_relative_path(raw_path, infer_file(prompt)[0])
+        language = language_from_filename(relative_path)
+        disk_path = stage_workspace_file(chat_id, relative_path, content)
+        blocked = should_block_generated_test(prompt, relative_path, content)
+        if blocked:
+            safety_blocked = True
+            passed, output = False, safety_blocked_test_output()
+        elif run_tests and should_test_generated_file(language) and tested_files < max_test_files:
+            passed, output = test_generated_content(content, relative_path, language)
+            tested_files += 1
+        else:
+            passed, output = True, "Test skipped by model registry policy."
+        artifacts.append(ArtifactDraft(name=relative_path, language=language, content=content, file_type="code", disk_path=str(disk_path)))
+        passed_values.append(passed)
+        test_outputs.append(f"{relative_path}: {output}")
+        consumed_ranges.append(match.span())
+
+    if allow_fallback and not artifacts:
+        code_pattern = re.compile(r"```(?P<language>[A-Za-z0-9_+.-]*)\s*\n(?P<content>.*?)```", re.DOTALL)
+        match = code_pattern.search(response)
+        if match:
+            fallback_name, fallback_language = infer_file(prompt)
+            content = match.group("content").strip("\n")
+            language = language_from_filename(fallback_name, match.group("language") or fallback_language)
+            disk_path = stage_workspace_file(chat_id, fallback_name, content)
+            blocked = should_block_generated_test(prompt, fallback_name, content)
+            if blocked:
+                safety_blocked = True
+                passed, output = False, safety_blocked_test_output()
+            elif run_tests and should_test_generated_file(language) and tested_files < max_test_files:
+                passed, output = test_generated_content(content, fallback_name, language)
+                tested_files += 1
+            else:
+                passed, output = True, "Test skipped by model registry policy."
+            artifacts.append(ArtifactDraft(name=fallback_name, language=language, content=content, file_type="code", disk_path=str(disk_path)))
+            passed_values.append(passed)
+            test_outputs.append(f"{fallback_name}: {output}")
+            consumed_ranges.append(match.span())
+
+    if allow_fallback and not artifacts and response.strip():
+        fallback_name, fallback_language = infer_file(prompt)
+        content = response.strip()
+        disk_path = stage_workspace_file(chat_id, fallback_name, content)
+        blocked = should_block_generated_test(prompt, fallback_name, content)
+        if blocked:
+            safety_blocked = True
+            passed, output = False, safety_blocked_test_output()
+        elif run_tests and should_test_generated_file(fallback_language) and tested_files < max_test_files:
+            passed, output = test_generated_content(content, fallback_name, fallback_language)
+            tested_files += 1
+        else:
+            passed, output = True, "Test skipped by model registry policy."
+        artifacts.append(ArtifactDraft(name=fallback_name, language=fallback_language, content=content, file_type="code", disk_path=str(disk_path)))
+        passed_values.append(passed)
+        test_outputs.append(f"{fallback_name}: {output}")
+
+    cleaned_response = response
+    for start, end in reversed(consumed_ranges):
+        cleaned_response = f"{cleaned_response[:start]}{cleaned_response[end:]}"
+    cleaned_response = cleaned_response.strip()
+    if artifacts:
+        file_list = ", ".join(f"`{artifact.name}`" for artifact in artifacts)
+        prefix = f"Подготовил файл(ы) к применению: {file_list}. Проверь diff и нажми APPLY в панели Files."
+        if safety_blocked:
+            prefix += " Автотесты отключены политикой безопасности."
+        cleaned_response = prefix + (f"\n\n{cleaned_response}" if cleaned_response else "")
+
+    aggregate_passed = all(passed_values) if passed_values else None
+    return artifacts, aggregate_passed, "\n".join(test_outputs), cleaned_response
+
+
+def postprocess_assistant_response(response: str, *, max_tokens: int = 0, token_count: int = 0) -> tuple[str, bool]:
+    text = (response or "").replace("\r\n", "\n")
+    text = text.replace("[DONE]", "").replace("<s>", "").replace("</s>", "").strip()
+
+    lines: list[str] = []
+    for line in text.split("\n"):
+        if lines and lines[-1].strip() == line.strip() and line.strip():
+            continue
+        lines.append(line)
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    needs_continuation = False
+    if text.count("```") % 2 == 1:
+        text = f"{text.rstrip()}\n```"
+        needs_continuation = True
+
+    if max_tokens > 0 and token_count >= max(24, int(max_tokens * 0.92)):
+        needs_continuation = True
+
+    if text.endswith(("...", "…", "```")) and max_tokens > 0 and token_count >= max(24, int(max_tokens * 0.75)):
+        needs_continuation = True
+
+    return text, needs_continuation
 
 
 def create_image_artifact(prompt: str, public_url: str) -> ArtifactDraft:
@@ -282,7 +595,14 @@ def mock_text_response(prompt: str, mode: str, model_name: str, attachment_count
     )
 
 
-def build_local_draft(prompt: str, mode: str, model_name: str, public_image_base: str, attachment_count: int = 0) -> ResponseDraft:
+def build_local_draft(
+    prompt: str,
+    mode: str,
+    model_name: str,
+    public_image_base: str,
+    attachment_count: int = 0,
+    chat_id: str | None = None,
+) -> ResponseDraft:
     thinking = ""
     if mode == "expert":
         thinking = "Analyzing request...\nChecking whether files or images are needed...\nPreparing persistent artifacts and tests..."
@@ -298,7 +618,7 @@ def build_local_draft(prompt: str, mode: str, model_name: str, public_image_base
         )
 
     if wants_file(prompt):
-        file, passed, output = create_code_artifact(prompt)
+        file, passed, output = create_code_artifact(prompt, chat_id=chat_id)
         return ResponseDraft(
             content=f"Создал файл `{file.name}`. Содержимое показано ниже, тест/проверка уже выполнены.",
             thinking=thinking,
@@ -315,59 +635,230 @@ def chunk_text(text: str, size: int = 16) -> Iterable[str]:
         yield text[idx : idx + size]
 
 
-def llama_cpp_prompt(prompt: str, mode: str, model_name: str, system_prompt: str = "") -> str:
+def likely_russian(text: str) -> bool:
+    cyrillic = sum(1 for char in text if "а" <= char.lower() <= "я" or char.lower() == "ё")
+    return cyrillic >= 2
+
+
+def language_guard(prompt: str) -> str:
+    if likely_russian(prompt):
+        return (
+            "The latest user message is Russian. Answer in Russian only, unless the user explicitly asks for another "
+            "language. Do not output unrelated transliterated words, Malay, Indonesian, Turkish, Lezgian, or filler."
+        )
+    return "Answer in the same language as the latest user message."
+
+
+def looks_like_language_drift(prompt: str, response: str) -> bool:
+    if not likely_russian(prompt):
+        return False
+    stripped = response.strip()
+    if len(stripped) < 12:
+        return False
+    if "```" in stripped:
+        return False
+    cyrillic = sum(1 for char in stripped if "а" <= char.lower() <= "я" or char.lower() == "ё")
+    latin = sum(1 for char in stripped if "a" <= char.lower() <= "z")
+    return cyrillic == 0 and latin >= 6
+
+
+def llama_cpp_system_prompt(mode: str, system_prompt: str = "", latest_prompt: str = "") -> str:
     system = system_prompt.strip() or (
         "You are Time To Deny, a local AI assistant powered by llama.cpp. "
-        "Answer clearly, stream useful output, and prefer runnable code when asked."
+        "Answer clearly, stream useful output, and prefer runnable code when asked. "
+        "Always answer in the same language as the user's latest message. "
+        "If the user writes in Russian, answer in Russian. "
+        "Never switch to Indonesian, Malay, Turkish, or another unrelated language unless the user asks for it."
     )
     if mode == "expert":
         system += "\nUse careful reasoning internally, then provide a direct final answer."
     else:
         system += "\nAnswer directly and keep latency low."
-    return (
-        "<|system|>\n"
-        f"{system}\n"
-        "<|user|>\n"
-        f"{prompt.strip()}\n"
-        "<|assistant|>\n"
-    )
+    if latest_prompt:
+        system += f"\n{language_guard(latest_prompt)}"
+    system += f"\n{agent_capability_prompt()}"
+    system += f"\n{artifact_protocol_prompt()}"
+    return system
 
 
-def stream_llamacpp(prompt: str, mode: str, model_name: str, system_prompt: str = "") -> Iterable[str]:
+def token_from_llamacpp_chunk(item: dict) -> str:
+    choices = item.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        delta = first.get("delta")
+        if isinstance(delta, dict):
+            return str(delta.get("content") or "")
+        message = first.get("message")
+        if isinstance(message, dict):
+            return str(message.get("content") or "")
+        return str(first.get("text") or "")
+    return str(item.get("content") or item.get("response") or "")
+
+
+def is_llamacpp_done(item: dict) -> bool:
+    if item.get("stop") or item.get("done"):
+        return True
+    choices = item.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        return bool(first.get("finish_reason"))
+    return False
+
+
+def normalize_history(history: list[dict[str, str]] | None) -> list[dict[str, str]]:
+    if not history:
+        return []
+    normalized: list[dict[str, str]] = []
+    for item in history:
+        role = item.get("role", "")
+        content = (item.get("content") or "").strip()
+        if role not in {"system", "user", "assistant"} or not content:
+            continue
+        normalized.append({"role": role, "content": content[:4000]})
+    return normalized
+
+
+def _llamacpp_payload(
+    prompt: str,
+    mode: str,
+    model_name: str,
+    system_prompt: str = "",
+    history: list[dict[str, str]] | None = None,
+    extra_guard: str = "",
+    options: dict[str, Any] | None = None,
+) -> dict:
+    options = options or {}
+    system = llama_cpp_system_prompt(mode, system_prompt, prompt)
+    if extra_guard:
+        system += f"\n{extra_guard}"
     payload = {
-        "prompt": llama_cpp_prompt(prompt, mode, model_name, system_prompt),
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system},
+            *normalize_history(history),
+            {"role": "user", "content": prompt.strip()},
+        ],
         "stream": True,
-        "temperature": 0.2 if mode == "expert" else 0.5,
-        "n_predict": settings.TTD_LLAMA_CPP_N_PREDICT,
-        "cache_prompt": True,
-        "stop": ["<|user|>", "<|system|>", "</s>"],
+        "temperature": options.get("temperature", 0.12 if mode == "expert" else 0.18),
+        "top_p": 0.88,
     }
+    max_tokens = int(options.get("max_tokens") or settings.TTD_LLAMA_CPP_N_PREDICT or 0)
+    if max_tokens > 0:
+        payload["max_tokens"] = max_tokens
+    if options.get("prompt_cache_enabled", True):
+        payload["cache_prompt"] = True
+    return payload
+
+
+def _iter_llamacpp_tokens(payload: dict, stop_checker: Callable[[], None] | None = None) -> Iterable[str]:
     req = urllib.request.Request(
-        f"{settings.TTD_LLAMA_CPP_URL.rstrip('/')}/completion",
+        f"{settings.TTD_LLAMA_CPP_URL.rstrip('/')}/v1/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=settings.TTD_REQUEST_TIMEOUT_SECONDS) as response:
-            for raw in response:
-                if not raw:
-                    continue
-                line = raw.decode("utf-8").strip()
-                if not line or line.startswith(":"):
-                    continue
-                if line.startswith("data:"):
-                    line = line[5:].strip()
-                if line == "[DONE]":
-                    break
-                item = json.loads(line)
-                token = item.get("content") or item.get("response") or ""
-                if token:
-                    yield token
-                if item.get("stop") or item.get("done"):
-                    break
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        yield f"\n\n[llama.cpp backend unavailable: {exc}. Start llama-server or switch TTD_MODEL_BACKEND=mock for UI-only dev.]"
+    deadline = time.monotonic() + settings.TTD_LLAMA_READY_TIMEOUT_SECONDS
+    last_error: Exception | None = None
+
+    while time.monotonic() <= deadline:
+        try:
+            with urllib.request.urlopen(req, timeout=settings.TTD_REQUEST_TIMEOUT_SECONDS) as response:
+                for raw in response:
+                    if stop_checker:
+                        stop_checker()
+                    if not raw:
+                        continue
+                    line = raw.decode("utf-8").strip()
+                    if not line or line.startswith(":"):
+                        continue
+                    if line.startswith("data:"):
+                        line = line[5:].strip()
+                    if line == "[DONE]":
+                        return
+                    item = json.loads(line)
+                    token = token_from_llamacpp_chunk(item)
+                    if token:
+                        yield token
+                    if is_llamacpp_done(item):
+                        return
+                return
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code != 503 or time.monotonic() >= deadline:
+                break
+            if stop_checker:
+                stop_checker()
+            time.sleep(2)
+        except (TimeoutError, socket.timeout) as exc:
+            last_error = exc
+            break
+        except (urllib.error.URLError, json.JSONDecodeError) as exc:
+            last_error = exc
+            break
+
+    if isinstance(last_error, urllib.error.HTTPError) and last_error.code == 503:
+        raise RuntimeError(
+            "llama.cpp model is still not ready after waiting. It is usually still loading, out of RAM/VRAM, "
+            "or crashed during model load. Check Admin -> Server Load -> runtime logs or run .\\windows.ps1 logs."
+        ) from last_error
+    if isinstance(last_error, (TimeoutError, socket.timeout)):
+        raise RuntimeError(
+            f"llama.cpp did not produce a token within {settings.TTD_REQUEST_TIMEOUT_SECONDS}s. "
+            "The model is too slow for the current server/context, still loading, or stuck. "
+            "Try again, reduce LLAMA_CPP_CTX_SIZE, use a smaller quant/model, or increase TTD_REQUEST_TIMEOUT_SECONDS."
+        ) from last_error
+
+    raise RuntimeError(
+        f"llama.cpp backend unavailable: {last_error}. Start llama-server or switch TTD_MODEL_BACKEND=mock for UI-only dev."
+    ) from last_error
+
+
+def stream_llamacpp(
+    prompt: str,
+    mode: str,
+    model_name: str,
+    system_prompt: str = "",
+    history: list[dict[str, str]] | None = None,
+    stop_checker: Callable[[], None] | None = None,
+    options: dict[str, Any] | None = None,
+) -> Iterable[str]:
+    payload = _llamacpp_payload(prompt, mode, model_name, system_prompt, history, options=options)
+    token_iter = _iter_llamacpp_tokens(payload, stop_checker=stop_checker)
+    initial_tokens: list[str] = []
+    initial_text = ""
+
+    for token in token_iter:
+        initial_tokens.append(token)
+        initial_text += token
+        if len(initial_text.strip()) >= 80 or len(initial_tokens) >= 8:
+            break
+
+    if looks_like_language_drift(prompt, initial_text):
+        retry_payload = _llamacpp_payload(
+            prompt,
+            mode,
+            model_name,
+            system_prompt,
+            history,
+            "Previous answer drifted into the wrong language. Retry once and answer in clean Russian only.",
+            options=options,
+        )
+        token_iter = _iter_llamacpp_tokens(retry_payload, stop_checker=stop_checker)
+        initial_tokens = []
+        for token in token_iter:
+            initial_tokens.append(token)
+            if len("".join(initial_tokens).strip()) >= 80 or len(initial_tokens) >= 8:
+                break
+
+    for token in initial_tokens:
+        if stop_checker:
+            stop_checker()
+        yield token
+
+    for token in token_iter:
+        if stop_checker:
+            stop_checker()
+        yield token
 
 
 def system_snapshot(interval: str) -> dict:
@@ -456,3 +947,86 @@ def system_info() -> list[dict[str, str]]:
         {"label": "llama.cpp URL", "value": settings.TTD_LLAMA_CPP_URL},
         {"label": "Model dir", "value": str(settings.TTD_MODEL_DIR)},
     ]
+
+
+def infer_hf_model_type(repo_id: str, tags: list[str], pipeline_tag: str | None = None) -> str:
+    haystack = " ".join([repo_id, *tags, pipeline_tag or ""]).lower()
+    code_markers = ("coder", "code", "programming", "fill-mask-code")
+    vision_markers = ("vision", "image", "diffusion", "stable-diffusion", "sdxl", "flux", "clip", "siglip")
+
+    if any(marker in haystack for marker in code_markers):
+        return "code"
+    if any(marker in haystack for marker in vision_markers):
+        return "vision"
+    return "text"
+
+
+def search_huggingface_models(query: str, model_type: str = "", limit: int = 8) -> list[dict[str, Any]]:
+    try:
+        from huggingface_hub import HfApi
+    except ImportError as exc:
+        raise RuntimeError("huggingface_hub is not installed on the backend") from exc
+
+    api = HfApi()
+    normalized_query = (query or "").strip()
+    normalized_type = model_type if model_type in {"text", "vision", "code"} else ""
+    fetch_limit = max(limit * 5, 24)
+    seen: set[str] = set()
+    results: list[dict[str, Any]] = []
+    search_term = f"{normalized_query} GGUF".strip() if normalized_query else "gguf"
+
+    try:
+        iterator = api.list_models(search=search_term, limit=fetch_limit)
+        for item in iterator:
+            repo_id = getattr(item, "id", None) or getattr(item, "modelId", None)
+            if not repo_id or repo_id in seen:
+                continue
+            seen.add(repo_id)
+
+            try:
+                details = api.model_info(repo_id)
+            except Exception:
+                continue
+
+            siblings = getattr(details, "siblings", None) or []
+            gguf_files = sorted(
+                {
+                    getattr(file, "rfilename", "")
+                    for file in siblings
+                    if getattr(file, "rfilename", "").lower().endswith(".gguf")
+                }
+            )
+            if not gguf_files:
+                continue
+
+            tags = list(getattr(details, "tags", None) or getattr(item, "tags", None) or [])
+            pipeline_tag = getattr(details, "pipeline_tag", None) or getattr(item, "pipeline_tag", None)
+            inferred_type = infer_hf_model_type(repo_id, tags, pipeline_tag)
+            if normalized_type and inferred_type != normalized_type:
+                continue
+
+            last_modified = getattr(details, "last_modified", None)
+            updated_at = ""
+            if last_modified:
+                updated_at = last_modified.isoformat(sep=" ", timespec="seconds") if hasattr(last_modified, "isoformat") else str(last_modified)
+
+            results.append(
+                {
+                    "repoId": repo_id,
+                    "name": repo_id.split("/")[-1],
+                    "type": inferred_type,
+                    "downloads": int(getattr(details, "downloads", 0) or 0),
+                    "likes": int(getattr(details, "likes", 0) or 0),
+                    "pipelineTag": pipeline_tag or "",
+                    "updatedAt": updated_at,
+                    "tags": tags[:6],
+                    "ggufFiles": gguf_files[:8],
+                }
+            )
+
+            if len(results) >= limit:
+                break
+    except Exception as exc:
+        raise RuntimeError(f"HuggingFace search failed: {exc}") from exc
+
+    return results
