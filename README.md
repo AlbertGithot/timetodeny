@@ -61,7 +61,8 @@ The launcher also creates these folders automatically.
 - `llamaserver/` — local llama.cpp source/build folder; ignored by git.
 - `backend/media/` — generated files/images; ignored by git.
 - `frontend/` — Next.js app, source, assets, and config files.
-- `windows.ps1` / `windows.bat` — Windows launcher that builds the TypeScript frontend, starts llama.cpp when possible, and serves everything through Django.
+- `build-windows-exe.ps1` — builds `dist\TimeToDeny.exe` with the site icon from `frontend\public\assets\images\app_logo.png`.
+- `windows.ps1` / `windows.bat` — script fallback launcher that builds the TypeScript frontend, starts llama.cpp when possible, and serves everything through Django.
 
 ## Launch
 
@@ -70,6 +71,19 @@ Before startup it also tries to fast-forward the current git branch from `origin
 The launcher also creates `models\` and `llamaserver\`, uses root `manage.py` and `requirements.txt`, builds the `frontend\` app, and looks for nearby `.gguf` models.
 If `llama-server.exe` is missing, the launcher can clone/update and build `ggml-org/llama.cpp` into `llamaserver\llama.cpp` when git, CMake, and a C++ compiler are available.
 By default Django binds to `0.0.0.0:8000` and serves both the API and the exported frontend. There is no public or internal Next.js runtime server in the normal launcher path.
+
+Build the native launcher exe first:
+
+```powershell
+winget install Microsoft.DotNet.SDK.8
+.\build-windows-exe.ps1
+.\dist\TimeToDeny.exe start
+```
+
+`windows.bat` also uses `dist\TimeToDeny.exe` automatically after it exists.
+GitHub Actions also builds the same exe on pushes to the `windows` branch and uploads it as `TimeToDeny-windows-launcher`.
+
+Script fallback:
 
 ```powershell
 .\windows.ps1
@@ -92,14 +106,14 @@ $env:TTD_AUTO_BOOTSTRAP_LLAMA_CPP = "0"
 Useful launcher commands:
 
 ```powershell
-.\windows.ps1 start
-.\windows.ps1 stop
-.\windows.ps1 restart
-.\windows.ps1 status
-.\windows.ps1 logs
-.\windows.ps1 foreground
-.\windows.ps1 doctor
-.\windows.ps1 repair
+.\dist\TimeToDeny.exe start
+.\dist\TimeToDeny.exe stop
+.\dist\TimeToDeny.exe restart
+.\dist\TimeToDeny.exe status
+.\dist\TimeToDeny.exe logs
+.\dist\TimeToDeny.exe foreground
+.\dist\TimeToDeny.exe doctor
+.\dist\TimeToDeny.exe repair
 ```
 
 The launcher starts:

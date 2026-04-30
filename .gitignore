@@ -9,6 +9,8 @@ out/
 
 # Production build
 build/
+dist/
+launcher/windows/app_logo.ico
 
 # Logs
 npm-debug.log*

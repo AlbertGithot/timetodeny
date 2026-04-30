@@ -1,0 +1,38 @@
+name: Windows launcher
+
+on:
+  push:
+    branches:
+      - windows
+    paths:
+      - ".github/workflows/windows-launcher.yml"
+      - "build-windows-exe.ps1"
+      - "launcher/windows/**"
+      - "frontend/public/assets/images/app_logo.png"
+      - "windows.ps1"
+      - "windows.bat"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build TimeToDeny.exe
+        shell: pwsh
+        run: ./build-windows-exe.ps1
+
+      - name: Upload launcher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TimeToDeny-windows-launcher
+          path: dist/TimeToDeny.exe
+          if-no-files-found: error
