@@ -1,13 +1,49 @@
 from __future__ import annotations
 
 import os
+import secrets
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = BACKEND_DIR.parent
 
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-change-me")
-DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
+    raw = os.environ.get(name)
+    try:
+        value = int(raw) if raw not in {None, ""} else default
+    except ValueError:
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def default_secret_key() -> str:
+    secret_path = Path(os.environ.get("DJANGO_SECRET_KEY_FILE", PROJECT_ROOT / ".runtime" / "state" / "django_secret_key"))
+    try:
+        if secret_path.exists():
+            saved = secret_path.read_text(encoding="utf-8").strip()
+            if len(saved) >= 50:
+                return saved
+        secret_path.parent.mkdir(parents=True, exist_ok=True)
+        generated = secrets.token_urlsafe(64)
+        secret_path.write_text(generated, encoding="utf-8")
+        return generated
+    except OSError:
+        return secrets.token_urlsafe(64)
+
+
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or default_secret_key()
+DEBUG = env_bool("DJANGO_DEBUG", True)
 
 ALLOWED_HOSTS = [
     host.strip()
@@ -32,6 +68,7 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
 ROOT_URLCONF = "timetodeny.urls"
@@ -91,27 +128,27 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = Path(os.environ.get("TTD_MEDIA_ROOT", BACKEND_DIR / "media"))
 TTD_FRONTEND_BUILD_ROOT = Path(os.environ.get("TTD_FRONTEND_BUILD_ROOT", PROJECT_ROOT / "frontend" / "out"))
 TTD_FRONTEND_DIR = Path(os.environ.get("TTD_FRONTEND_DIR", PROJECT_ROOT / "frontend"))
-TTD_AUTO_BUILD_FRONTEND = os.environ.get("TTD_AUTO_BUILD_FRONTEND", "1") != "0"
-TTD_FRONTEND_BUILD_TIMEOUT_SECONDS = int(os.environ.get("TTD_FRONTEND_BUILD_TIMEOUT_SECONDS", "240"))
+TTD_AUTO_BUILD_FRONTEND = env_bool("TTD_AUTO_BUILD_FRONTEND", True)
+TTD_FRONTEND_BUILD_TIMEOUT_SECONDS = env_int("TTD_FRONTEND_BUILD_TIMEOUT_SECONDS", 240, minimum=1)
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 TTD_FRONTEND_ORIGIN = os.environ.get("TTD_FRONTEND_ORIGIN", "http://127.0.0.1:8000")
 TTD_MODEL_BACKEND = os.environ.get("TTD_MODEL_BACKEND", "mock").lower()
 TTD_LLAMA_CPP_URL = os.environ.get("TTD_LLAMA_CPP_URL", "http://127.0.0.1:8080")
-TTD_LLAMA_CPP_N_PREDICT = int(os.environ.get("TTD_LLAMA_CPP_N_PREDICT", "0"))
-TTD_LLAMA_CPP_CTX_SIZE = int(os.environ.get("TTD_LLAMA_CPP_CTX_SIZE", "8192"))
-TTD_LLAMA_READY_TIMEOUT_SECONDS = int(os.environ.get("TTD_LLAMA_READY_TIMEOUT_SECONDS", "180"))
+TTD_LLAMA_CPP_N_PREDICT = env_int("TTD_LLAMA_CPP_N_PREDICT", 0, minimum=0)
+TTD_LLAMA_CPP_CTX_SIZE = env_int("TTD_LLAMA_CPP_CTX_SIZE", 8192, minimum=1)
+TTD_LLAMA_READY_TIMEOUT_SECONDS = env_int("TTD_LLAMA_READY_TIMEOUT_SECONDS", 180, minimum=1)
 TTD_MODEL_DIR = Path(os.environ.get("TTD_MODEL_DIR", PROJECT_ROOT / "models"))
 TTD_GENERATED_DIR = Path(os.environ.get("TTD_GENERATED_DIR", MEDIA_ROOT / "generated"))
-TTD_REQUEST_TIMEOUT_SECONDS = int(os.environ.get("TTD_REQUEST_TIMEOUT_SECONDS", "900"))
+TTD_REQUEST_TIMEOUT_SECONDS = env_int("TTD_REQUEST_TIMEOUT_SECONDS", 900, minimum=1)
 TTD_ALLOW_HF_DOWNLOAD = os.environ.get("TTD_ALLOW_HF_DOWNLOAD", "1")
-TTD_MAX_PROMPT_CHARS = int(os.environ.get("TTD_MAX_PROMPT_CHARS", "0"))
-TTD_MAX_ATTACHMENTS = int(os.environ.get("TTD_MAX_ATTACHMENTS", "0"))
-TTD_MAX_ATTACHMENT_CHARS = int(os.environ.get("TTD_MAX_ATTACHMENT_CHARS", "0"))
-TTD_CHAT_CONTEXT_MESSAGES = int(os.environ.get("TTD_CHAT_CONTEXT_MESSAGES", "12"))
-TTD_ADMIN_SESSION_TTL_SECONDS = int(os.environ.get("TTD_ADMIN_SESSION_TTL_SECONDS", "86400"))
-TTD_LOGIN_RATE_LIMIT_ATTEMPTS = int(os.environ.get("TTD_LOGIN_RATE_LIMIT_ATTEMPTS", "5"))
-TTD_LOGIN_RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("TTD_LOGIN_RATE_LIMIT_WINDOW_SECONDS", "300"))
-TTD_WORKSPACE_MAX_FILE_BYTES = int(os.environ.get("TTD_WORKSPACE_MAX_FILE_BYTES", "0"))
-TTD_LOG_TAIL_LINES = int(os.environ.get("TTD_LOG_TAIL_LINES", "120"))
+TTD_MAX_PROMPT_CHARS = env_int("TTD_MAX_PROMPT_CHARS", 0, minimum=0)
+TTD_MAX_ATTACHMENTS = env_int("TTD_MAX_ATTACHMENTS", 0, minimum=0)
+TTD_MAX_ATTACHMENT_CHARS = env_int("TTD_MAX_ATTACHMENT_CHARS", 0, minimum=0)
+TTD_CHAT_CONTEXT_MESSAGES = env_int("TTD_CHAT_CONTEXT_MESSAGES", 12, minimum=0)
+TTD_ADMIN_SESSION_TTL_SECONDS = env_int("TTD_ADMIN_SESSION_TTL_SECONDS", 86400, minimum=60)
+TTD_LOGIN_RATE_LIMIT_ATTEMPTS = env_int("TTD_LOGIN_RATE_LIMIT_ATTEMPTS", 5, minimum=1)
+TTD_LOGIN_RATE_LIMIT_WINDOW_SECONDS = env_int("TTD_LOGIN_RATE_LIMIT_WINDOW_SECONDS", 300, minimum=1)
+TTD_WORKSPACE_MAX_FILE_BYTES = env_int("TTD_WORKSPACE_MAX_FILE_BYTES", 0, minimum=0)
+TTD_LOG_TAIL_LINES = env_int("TTD_LOG_TAIL_LINES", 120, minimum=1)

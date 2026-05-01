@@ -35,7 +35,17 @@ if (-not $env:TTD_MODEL_DIR) { $env:TTD_MODEL_DIR = $ModelsDir }
 if (-not $env:TTD_LLAMA_CPP_URL) { $env:TTD_LLAMA_CPP_URL = "http://${LlamaCppHost}:${LlamaCppPort}" }
 if (-not $env:TTD_FRONTEND_ORIGIN) { $env:TTD_FRONTEND_ORIGIN = "http://127.0.0.1:${BackendPort}" }
 if (-not $env:NEXT_PUBLIC_API_BASE) { $env:NEXT_PUBLIC_API_BASE = "/api" }
-if (-not $env:DJANGO_ALLOWED_HOSTS) { $env:DJANGO_ALLOWED_HOSTS = "127.0.0.1,localhost,0.0.0.0" }
+if (-not $env:DJANGO_ALLOWED_HOSTS) {
+  $allowedHosts = @("127.0.0.1", "localhost", "0.0.0.0")
+  try {
+    $allowedHosts += [System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |
+      Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } |
+      ForEach-Object { $_.IPAddressToString }
+  } catch {
+    Write-Host "Could not detect host IP addresses for DJANGO_ALLOWED_HOSTS"
+  }
+  $env:DJANGO_ALLOWED_HOSTS = ($allowedHosts | Where-Object { $_ } | Sort-Object -Unique) -join ","
+}
 if (-not $env:TTD_AUTO_UPDATE) { $env:TTD_AUTO_UPDATE = "1" }
 if (-not $env:TTD_AUTO_BOOTSTRAP_LLAMA_CPP) { $env:TTD_AUTO_BOOTSTRAP_LLAMA_CPP = "1" }
 if (-not $env:LLAMA_CPP_REPO_URL) { $env:LLAMA_CPP_REPO_URL = "https://github.com/ggml-org/llama.cpp.git" }
