@@ -2,5 +2,3 @@ Django>=5.2,<6
 psutil>=5.9
 huggingface_hub>=0.24
 PyMySQL>=1.1
-aiogram>=3.7,<4
-requests>=2.31
