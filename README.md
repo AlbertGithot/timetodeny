@@ -63,6 +63,61 @@ The launcher also creates these folders automatically.
 - `frontend/` — Next.js app, source, assets, and config files.
 - `build-windows-exe.ps1` — builds `dist\TimeToDeny.exe` with the site icon from `frontend\public\assets\images\app_logo.png`.
 - `windows.ps1` / `windows.bat` — script fallback launcher that builds the TypeScript frontend, starts llama.cpp when possible, and serves everything through Django.
+- `telegram_bot.py` / `telegram_image_bot/` — Telegram bot for DAPI image search by tags, user settings, blacklist, favorites, history, and feed mode.
+
+## Telegram DAPI Bot
+
+The Telegram bot is separate from the Django/Next.js app and runs from the repository root.
+
+Required environment:
+
+```powershell
+$env:TG_BOT_TOKEN = "telegram-bot-token"
+```
+
+Optional access whitelist:
+
+```powershell
+$env:TG_BOT_WHITELIST = "123456789,987654321"
+```
+
+Run:
+
+```powershell
+python telegram_bot.py
+```
+
+Data is stored in `bot_data/bot.sqlite3` by default. Useful env vars:
+
+- `TG_BOT_DB`: custom SQLite path.
+- `TG_BOT_SAFE_DEFAULT`: default safe mode, `1` by default.
+- `TG_BOT_WHITELIST`: comma-separated allowed chat IDs.
+- `TG_BOT_RECENT_LIMIT`: anti-repeat post window, default `60`.
+- `TG_BOT_HISTORY_LIMIT`: stored search history limit, default `20`.
+- `TG_BOT_FEED_INTERVAL_SECONDS`: feed interval, minimum `60`, default `300`.
+- `DAPI_URL`: DAPI endpoint root, default `https://rule34.xxx/index.php`.
+- `DAPI_LIMIT`: posts per API request, default `100`.
+- `DAPI_CACHE_TTL_SECONDS`: in-process query cache TTL, default `300`.
+
+Bot commands:
+
+```text
+/search <tags>
+/random
+/mode preview|sample|full
+/safe on|off
+/blacklist_add <tags>
+/blacklist_remove <tags>
+/blacklist
+/fav
+/history
+/suggest <tag>
+/feed <tags>
+/feed off
+/reset
+```
+
+The bot always applies a hard denylist for minor-related tags even if a user turns safe mode off. Да, это тот случай, где лучше быть скучным, чем потом разгребать мусор.
 
 ## Launch
 

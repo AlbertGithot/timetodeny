@@ -49,3 +49,4 @@ backend/media/
 backend/models/
 models/
 llamaserver/
+bot_data/
